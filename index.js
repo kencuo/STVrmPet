@@ -8,9 +8,10 @@
 import { getContext } from '/scripts/extensions.js';
 import { getStringHash } from '/scripts/utils.js';
 
-import * as THREE from './vendor/three.module.js';
-import { GLTFLoader } from './vendor/GLTFLoader.js';
-import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js';
+// NOTE: Keep `?v=` in sync across local vendor modules to avoid duplicate module instances in the browser cache.
+import * as THREE from './vendor/three.module.js?v=20260127';
+import { GLTFLoader } from './vendor/GLTFLoader.js?v=20260127';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=20260127';
 
 const MODULE_NAME = 'vrm-pet';
 
