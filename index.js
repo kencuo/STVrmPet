@@ -251,7 +251,16 @@ async function ensureRenderer(overlayEl) {
     const stage = overlayEl.querySelector('.vrm-pet-stage');
     if (!stage) throw new Error('Overlay stage not found');
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    // Force WebGL1 when possible.
+    // three-vrm's MToon ShaderMaterial (VRM0) tends to be more compatible on WebGL1;
+    // WebGL2 triggers GLSL3 conversion which can surface shader chunk compatibility issues.
+    const canvas = document.createElement('canvas');
+    const context =
+      canvas.getContext('webgl', { alpha: true, antialias: true, premultipliedAlpha: false }) ||
+      canvas.getContext('experimental-webgl', { alpha: true, antialias: true, premultipliedAlpha: false });
+    if (!context) throw new Error('WebGL not supported');
+
+    const renderer = new THREE.WebGLRenderer({ canvas, context, antialias: true, alpha: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
     stage.appendChild(renderer.domElement);
