@@ -9,9 +9,9 @@ import { getContext } from '/scripts/extensions.js';
 import { getStringHash } from '/scripts/utils.js';
 
 // NOTE: Keep `?v=` in sync across local vendor modules to avoid duplicate module instances in the browser cache.
-import * as THREE from './vendor/three.module.js?v=2026012704';
-import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012704';
-import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012704';
+import * as THREE from './vendor/three.module.js?v=2026012705';
+import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012705';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012705';
 
 const MODULE_NAME = 'vrm-pet';
 
@@ -233,6 +233,22 @@ function replaceVrmMaterialsForCompatibility(root) {
 
     const hasUv = !!obj.geometry?.getAttribute?.('uv');
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+
+    // VRM0 MToon often creates separate outline meshes/materials.
+    // If we downgrade those outline materials to MeshBasic without the outline vertex expansion,
+    // the outline draw-call can z-fight and overwrite the base mesh, resulting in a black silhouette.
+    //
+    // Hide outline-only meshes; we only want the "base" mesh for the pet overlay.
+    const isOutlineLike = (m) =>
+      !!m &&
+      (m.isOutline === true ||
+        (typeof m.name === 'string' && m.name.includes('Outline')) ||
+        (typeof obj.name === 'string' && obj.name.includes('Outline')));
+    if (mats.length > 0 && mats.every(isOutlineLike)) {
+      obj.visible = false;
+      return;
+    }
+
     let changed = false;
 
     const nextMats = mats.map((m) => {
@@ -245,7 +261,16 @@ function replaceVrmMaterialsForCompatibility(root) {
       replacedCount++;
 
       // Some VRMs rely on vertex colors (no baseColor texture); honor them if present.
-      const hasVertexColors = !!(m.vertexColors || obj.geometry?.getAttribute?.('color'));
+      // Avoid enabling vertexColors if the attribute exists but is all-zero (would turn the mesh black).
+      const colorAttr = obj.geometry?.getAttribute?.('color') ?? null;
+      const hasVertexColorsAttr = !!colorAttr;
+      let hasUsableVertexColors = !!m.vertexColors;
+      if (!hasUsableVertexColors && hasVertexColorsAttr && colorAttr?.array?.length) {
+        const a = colorAttr.array;
+        // Sample a few entries only (fast even on large meshes).
+        const idxs = [0, 1, 2, Math.max(0, Math.floor(a.length / 2) - 1), Math.max(0, a.length - 1)];
+        hasUsableVertexColors = idxs.some((i) => typeof a[i] === 'number' && a[i] > 0.02);
+      }
       const mapTexRaw = m.map ?? m.uniforms?.map?.value ?? m.emissiveMap ?? m.uniforms?.emissiveMap?.value ?? null;
       // If the mesh has no UVs, sampling a texture will produce a solid (often black) silhouette.
       const mapTex = hasUv ? mapTexRaw : null;
@@ -272,7 +297,7 @@ function replaceVrmMaterialsForCompatibility(root) {
         withMapCount++;
       }
 
-      if (hasVertexColors) base.vertexColors = true;
+      if (hasUsableVertexColors) base.vertexColors = true;
 
       // If side is unset/unknown, double-side is usually safer for "pet overlay" rendering.
       if (base.side === undefined || base.side === null) base.side = THREE.DoubleSide;
