@@ -9,9 +9,9 @@ import { getContext } from '/scripts/extensions.js';
 import { getStringHash } from '/scripts/utils.js';
 
 // NOTE: Keep `?v=` in sync across local vendor modules to avoid duplicate module instances in the browser cache.
-import * as THREE from './vendor/three.module.js?v=2026012703';
-import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012703';
-import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012703';
+import * as THREE from './vendor/three.module.js?v=2026012704';
+import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012704';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012704';
 
 const MODULE_NAME = 'vrm-pet';
 
@@ -231,6 +231,7 @@ function replaceVrmMaterialsForCompatibility(root) {
     if (!obj || !obj.isMesh) return;
     meshCount++;
 
+    const hasUv = !!obj.geometry?.getAttribute?.('uv');
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
     let changed = false;
 
@@ -245,10 +246,18 @@ function replaceVrmMaterialsForCompatibility(root) {
 
       // Some VRMs rely on vertex colors (no baseColor texture); honor them if present.
       const hasVertexColors = !!(m.vertexColors || obj.geometry?.getAttribute?.('color'));
-      const mapTex = m.map ?? m.uniforms?.map?.value ?? m.emissiveMap ?? m.uniforms?.emissiveMap?.value ?? null;
+      const mapTexRaw = m.map ?? m.uniforms?.map?.value ?? m.emissiveMap ?? m.uniforms?.emissiveMap?.value ?? null;
+      // If the mesh has no UVs, sampling a texture will produce a solid (often black) silhouette.
+      const mapTex = hasUv ? mapTexRaw : null;
+
+      // If we end up without a texture, prefer a visible base color (some materials may default to black).
+      const baseColor = m.color?.clone?.() ?? new THREE.Color(1, 1, 1);
+      if (!mapTex && baseColor.r <= 0.01 && baseColor.g <= 0.01 && baseColor.b <= 0.01) {
+        baseColor.setRGB(1, 1, 1);
+      }
 
       const base = new THREE.MeshBasicMaterial({
-        color: m.color?.clone?.() ?? new THREE.Color(1, 1, 1),
+        color: baseColor,
         // Prefer baseColor map; fall back to emissive map if that's all we have.
         map: mapTex,
         transparent: !!m.transparent,
@@ -264,6 +273,9 @@ function replaceVrmMaterialsForCompatibility(root) {
       }
 
       if (hasVertexColors) base.vertexColors = true;
+
+      // If side is unset/unknown, double-side is usually safer for "pet overlay" rendering.
+      if (base.side === undefined || base.side === null) base.side = THREE.DoubleSide;
 
       // Skinned meshes need skinning enabled on the material.
       if (obj.isSkinnedMesh) base.skinning = true;
@@ -444,9 +456,8 @@ async function loadVrmFromUrl(url) {
 
           // Optimize and normalize orientation.
           VRMUtils.removeUnnecessaryJoints(vrm.scene);
-          try {
-            VRMUtils.removeUnnecessaryVertices(vrm.scene);
-          } catch (_) {}
+          // NOTE: removeUnnecessaryVertices can break UV/attributes on some models, leading to solid-color silhouettes.
+          // Keep it disabled for stability in the overlay renderer.
           VRMUtils.rotateVRM0(vrm);
 
           // Workaround: avoid incompatible MToon shaders and make sure colors are visible.
@@ -562,6 +573,17 @@ function createSettingsInterface() {
           </div>
 
           <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">调试日志</div>
+              <div class="settings-title-description">在控制台输出 VRM 材质/贴图信息（用于排查黑影/没颜色）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_enableLogging" class="toggle-input" ${pluginConfig.enableLogging ? 'checked' : ''} />
+              <label for="${MODULE_NAME}_enableLogging" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
               <div class="settings-title-text">为当前角色上传 VRM</div>
               <div class="settings-title-description">文件会保存到酒馆服务器（/api/files/upload）</div>
@@ -662,6 +684,10 @@ function bindSettingsEvents() {
       pluginConfig.enabled = /** @type {HTMLInputElement} */ (t).checked;
       saveSettings();
       ensureOverlay();
+    }
+    if (t.id === `${MODULE_NAME}_enableLogging`) {
+      pluginConfig.enableLogging = /** @type {HTMLInputElement} */ (t).checked;
+      saveSettings();
     }
 
     // Auto-upload after file picked (button click opens the picker).
