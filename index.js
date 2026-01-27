@@ -215,6 +215,52 @@ function stopRenderLoop() {
   }
 }
 
+function replaceMToonMaterialsWithStandard(root) {
+  if (!root) return;
+
+  // @pixiv/three-vrm's MToonMaterial currently isn't compatible with our vendored Three r161 shader chunks.
+  // Fallback to MeshStandardMaterial so models render (skinning included).
+  root.traverse((obj) => {
+    if (!obj || !obj.isMesh) return;
+
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    let changed = false;
+
+    const nextMats = mats.map((m) => {
+      if (!m || !m.isShaderMaterial || !m.isMToonMaterial) return m;
+      changed = true;
+
+      const std = new THREE.MeshStandardMaterial({
+        color: m.color?.clone?.() ?? new THREE.Color(1, 1, 1),
+        map: m.map ?? null,
+        normalMap: m.normalMap ?? null,
+        emissive: m.emissive?.clone?.() ?? new THREE.Color(0, 0, 0),
+        emissiveIntensity: typeof m.emissiveIntensity === 'number' ? m.emissiveIntensity : 1,
+        transparent: !!m.transparent,
+        opacity: typeof m.opacity === 'number' ? m.opacity : 1,
+        side: m.side,
+      });
+
+      // Common VRM defaults: non-metal.
+      std.metalness = 0;
+      std.roughness = 1;
+
+      // Skinned meshes need skinning enabled on the material.
+      if (obj.isSkinnedMesh) std.skinning = true;
+
+      if (typeof m.alphaTest === 'number') std.alphaTest = m.alphaTest;
+      std.depthWrite = m.depthWrite;
+      std.depthTest = m.depthTest;
+
+      return std;
+    });
+
+    if (!changed) return;
+
+    obj.material = Array.isArray(obj.material) ? nextMats : nextMats[0];
+  });
+}
+
 function disposeCurrentVrm() {
   if (!vrmRenderState.scene) return;
   if (!vrmRenderState.currentVrm) return;
@@ -252,11 +298,10 @@ async function ensureRenderer(overlayEl) {
     const stage = overlayEl.querySelector('.vrm-pet-stage');
     if (!stage) throw new Error('Overlay stage not found');
 
-    // Force WebGL1 when possible.
-    // three-vrm's MToon ShaderMaterial (VRM0) tends to be more compatible on WebGL1;
-    // WebGL2 triggers GLSL3 conversion which can surface shader chunk compatibility issues.
+    // Prefer WebGL2 (VRMs are usually skinned; Three r161 skinning shaders require WebGL2 for bone textures).
     const canvas = document.createElement('canvas');
     const context =
+      canvas.getContext('webgl2', { alpha: true, antialias: true, premultipliedAlpha: false }) ||
       canvas.getContext('webgl', { alpha: true, antialias: true, premultipliedAlpha: false }) ||
       canvas.getContext('experimental-webgl', { alpha: true, antialias: true, premultipliedAlpha: false });
     if (!context) throw new Error('WebGL not supported');
@@ -374,6 +419,10 @@ async function loadVrmFromUrl(url) {
             VRMUtils.removeUnnecessaryVertices(vrm.scene);
           } catch (_) {}
           VRMUtils.rotateVRM0(vrm);
+
+          // Workaround: our vendored three-vrm MToon shaders are not compatible with Three r161.
+          // Replace them before the scene is rendered.
+          replaceMToonMaterialsWithStandard(vrm.scene);
 
           vrmRenderState.scene.add(vrm.scene);
           vrmRenderState.currentVrm = vrm;
