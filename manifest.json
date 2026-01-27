@@ -1,0 +1,12 @@
+{
+  "display_name": "VRM Pet (Per Character)",
+  "loading_order": 55,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "ctrl",
+  "version": "0.1.0",
+  "homePage": "https://github.com/REPLACE_ME/vrm-pet"
+}
+
