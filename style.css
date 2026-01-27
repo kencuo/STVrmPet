@@ -1,0 +1,49 @@
+/* VRM Pet: floating overlay + settings layout */
+
+#vrm-pet-settings .settings-title-text {
+  font-weight: 600;
+}
+
+#vrm-pet-settings .vrm-pet-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+#vrm-pet-settings .vrm-pet-path {
+  word-break: break-all;
+  opacity: 0.9;
+}
+
+/* Floating "pet" container (renderer will be added later) */
+#vrm-pet-overlay {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  width: 240px;
+  height: 240px;
+  z-index: 9999;
+  pointer-events: auto;
+}
+
+#vrm-pet-overlay .vrm-pet-shell {
+  width: 100%;
+  height: 100%;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(6px);
+  display: grid;
+  place-items: center;
+  user-select: none;
+  touch-action: none; /* required for pointer-drag on mobile */
+}
+
+#vrm-pet-overlay .vrm-pet-shell .vrm-pet-hint {
+  font-size: 12px;
+  opacity: 0.9;
+  padding: 10px;
+  text-align: center;
+}
+
