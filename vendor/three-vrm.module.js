@@ -6,8 +6,8 @@
  * @pixiv/three-vrm is distributed under MIT License
  * https://github.com/pixiv/three-vrm/blob/release/LICENSE
  */
-import * as THREE from './three.module.js?v=2026012706';
-import { BufferAttribute } from './three.module.js?v=2026012706';
+import * as THREE from './three.module.js?v=2026012707';
+import { BufferAttribute } from './three.module.js?v=2026012707';
 
 /*!
  * @pixiv/three-vrm-core v2.0.0
