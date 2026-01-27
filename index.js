@@ -9,9 +9,9 @@ import { getContext } from '/scripts/extensions.js';
 import { getStringHash } from '/scripts/utils.js';
 
 // NOTE: Keep `?v=` in sync across local vendor modules to avoid duplicate module instances in the browser cache.
-import * as THREE from './vendor/three.module.js?v=2026012702';
-import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012702';
-import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012702';
+import * as THREE from './vendor/three.module.js?v=2026012703';
+import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012703';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012703';
 
 const MODULE_NAME = 'vrm-pet';
 
@@ -215,24 +215,42 @@ function stopRenderLoop() {
   }
 }
 
-function replaceMToonMaterialsWithStandard(root) {
+function replaceVrmMaterialsForCompatibility(root) {
   if (!root) return;
 
-  // @pixiv/three-vrm's MToonMaterial currently isn't compatible with our vendored Three r161 shader chunks.
+  // Our vendored three-vrm (v2.0.0) MToon shaders are not compatible with Three r161.
   // Fallback to MeshBasicMaterial so models render (skinning included) and colors are visible even without lighting.
+  //
+  // Additionally, some models may ship with MeshStandard/Physical materials; for consistent "has color" UX
+  // we also downgrade those to MeshBasicMaterial.
+  let meshCount = 0;
+  let replacedCount = 0;
+  let withMapCount = 0;
+
   root.traverse((obj) => {
     if (!obj || !obj.isMesh) return;
+    meshCount++;
 
     const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
     let changed = false;
 
     const nextMats = mats.map((m) => {
-      if (!m || !m.isShaderMaterial || !m.isMToonMaterial) return m;
+      if (!m) return m;
+
+      const isMToon = !!(m.isShaderMaterial && m.isMToonMaterial);
+      const isPbr = !!(m.isMeshStandardMaterial || m.isMeshPhysicalMaterial);
+      if (!isMToon && !isPbr) return m;
       changed = true;
+      replacedCount++;
+
+      // Some VRMs rely on vertex colors (no baseColor texture); honor them if present.
+      const hasVertexColors = !!(m.vertexColors || obj.geometry?.getAttribute?.('color'));
+      const mapTex = m.map ?? m.uniforms?.map?.value ?? m.emissiveMap ?? m.uniforms?.emissiveMap?.value ?? null;
 
       const base = new THREE.MeshBasicMaterial({
         color: m.color?.clone?.() ?? new THREE.Color(1, 1, 1),
-        map: m.map ?? null,
+        // Prefer baseColor map; fall back to emissive map if that's all we have.
+        map: mapTex,
         transparent: !!m.transparent,
         opacity: typeof m.opacity === 'number' ? m.opacity : 1,
         side: m.side,
@@ -242,12 +260,16 @@ function replaceMToonMaterialsWithStandard(root) {
       if (base.map) {
         base.map.colorSpace = THREE.SRGBColorSpace;
         base.map.needsUpdate = true;
+        withMapCount++;
       }
+
+      if (hasVertexColors) base.vertexColors = true;
 
       // Skinned meshes need skinning enabled on the material.
       if (obj.isSkinnedMesh) base.skinning = true;
 
       if (typeof m.alphaTest === 'number') base.alphaTest = m.alphaTest;
+      if (m.alphaMap) base.alphaMap = m.alphaMap;
       base.depthWrite = m.depthWrite;
       base.depthTest = m.depthTest;
 
@@ -258,6 +280,8 @@ function replaceMToonMaterialsWithStandard(root) {
 
     obj.material = Array.isArray(obj.material) ? nextMats : nextMats[0];
   });
+
+  log(`Material compat: meshes=${meshCount} replaced=${replacedCount} maps=${withMapCount}`);
 }
 
 function disposeCurrentVrm() {
@@ -306,6 +330,7 @@ async function ensureRenderer(overlayEl) {
     if (!context) throw new Error('WebGL not supported');
 
     const renderer = new THREE.WebGLRenderer({ canvas, context, antialias: true, alpha: true });
+    THREE.ColorManagement.enabled = true;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.NoToneMapping;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -315,6 +340,9 @@ async function ensureRenderer(overlayEl) {
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 1000);
     camera.position.set(0, 1.4, 2.2);
+    // three-vrm may assign some meshes to non-default layers (e.g. first-person setup).
+    // To avoid "loaded but invisible" issues, render all layers in the overlay.
+    camera.layers.enableAll();
 
     const ambient = new THREE.AmbientLight(0xffffff, 0.65);
     scene.add(ambient);
@@ -421,9 +449,8 @@ async function loadVrmFromUrl(url) {
           } catch (_) {}
           VRMUtils.rotateVRM0(vrm);
 
-          // Workaround: our vendored three-vrm MToon shaders are not compatible with Three r161.
-          // Replace them before the scene is rendered.
-          replaceMToonMaterialsWithStandard(vrm.scene);
+          // Workaround: avoid incompatible MToon shaders and make sure colors are visible.
+          replaceVrmMaterialsForCompatibility(vrm.scene);
 
           vrmRenderState.scene.add(vrm.scene);
           vrmRenderState.currentVrm = vrm;
