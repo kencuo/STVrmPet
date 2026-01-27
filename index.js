@@ -259,10 +259,12 @@ function createSettingsInterface() {
               <div class="settings-title-text">为当前角色上传 VRM</div>
               <div class="settings-title-description">文件会保存到酒馆服务器（/api/files/upload）</div>
               <div class="vrm-pet-row marginTop5">
-                <input type="file" id="${MODULE_NAME}_file" accept=".vrm" />
-                <button class="menu_button" id="${MODULE_NAME}_upload_btn">上传并绑定到当前角色</button>
+                <input type="file" id="${MODULE_NAME}_file" accept=".vrm" style="display:none" />
+                <button class="menu_button" id="${MODULE_NAME}_select_btn">选择 VRM 并上传</button>
+                <button class="menu_button" id="${MODULE_NAME}_upload_btn" title="已选文件时可用">上传并绑定</button>
                 <button class="menu_button" id="${MODULE_NAME}_clear_btn">清除当前角色绑定</button>
               </div>
+              <div class="vrm-pet-path marginTop5" id="${MODULE_NAME}_selected"></div>
               <div class="vrm-pet-path marginTop5" id="${MODULE_NAME}_current"></div>
             </div>
           </div>
@@ -308,10 +310,40 @@ function refreshCurrentBindingText() {
   el.textContent = `当前角色 VRM：${url}`;
 }
 
+function refreshSelectedFileText() {
+  const el = document.getElementById(`${MODULE_NAME}_selected`);
+  if (!el) return;
+  const fileInput = /** @type {HTMLInputElement|null} */ (document.getElementById(`${MODULE_NAME}_file`));
+  const file = fileInput?.files?.[0];
+  el.textContent = file ? `已选择文件：${file.name} (${Math.round(file.size / 1024 / 1024)}MB)` : '未选择文件。';
+}
+
 function saveSettings() {
   const ctx = getContext();
   ctx.extensionSettings[MODULE_NAME] = pluginConfig;
   ctx.saveSettingsDebounced();
+}
+
+async function handleUploadSelectedFile() {
+  const fileInput = /** @type {HTMLInputElement|null} */ (document.getElementById(`${MODULE_NAME}_file`));
+  const file = fileInput?.files?.[0];
+  if (!file) {
+    // More convenient UX: clicking "upload" without selecting triggers file picker.
+    fileInput?.click();
+    toastr?.warning?.('请选择一个 .vrm 文件', 'VRM Pet');
+    return;
+  }
+
+  toastr?.info?.('正在上传 VRM…', 'VRM Pet');
+  const uploaded = await uploadVrmToServer(file);
+  const saved = await saveVrmToCurrentCharacter({
+    url: uploaded.url,
+    storedName: uploaded.storedName,
+    originalName: file.name,
+  });
+  log('Saved character extension data', saved);
+  toastr?.success?.('已上传并绑定到当前角色', 'VRM Pet');
+  refreshCurrentBindingText();
 }
 
 function bindSettingsEvents() {
@@ -322,6 +354,16 @@ function bindSettingsEvents() {
       pluginConfig.enabled = /** @type {HTMLInputElement} */ (t).checked;
       saveSettings();
       ensureOverlay();
+    }
+
+    // Auto-upload after file picked (button click opens the picker).
+    if (t.id === `${MODULE_NAME}_file`) {
+      refreshSelectedFileText();
+      handleUploadSelectedFile().catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[VRM Pet] Upload failed', err);
+        toastr?.error?.(msg, 'VRM Pet');
+      });
     }
   });
 
@@ -341,23 +383,17 @@ function bindSettingsEvents() {
     const t = e.target;
     if (!(t instanceof HTMLElement)) return;
 
+    if (t.id === `${MODULE_NAME}_select_btn`) {
+      e.preventDefault();
+      const fileInput = /** @type {HTMLInputElement|null} */ (document.getElementById(`${MODULE_NAME}_file`));
+      fileInput?.click();
+      return;
+    }
+
     if (t.id === `${MODULE_NAME}_upload_btn`) {
       e.preventDefault();
       try {
-        const fileInput = /** @type {HTMLInputElement|null} */ (document.getElementById(`${MODULE_NAME}_file`));
-        const file = fileInput?.files?.[0];
-        if (!file) throw new Error('请选择一个 .vrm 文件');
-
-        toastr?.info?.('正在上传 VRM…', 'VRM Pet');
-        const uploaded = await uploadVrmToServer(file);
-        const saved = await saveVrmToCurrentCharacter({
-          url: uploaded.url,
-          storedName: uploaded.storedName,
-          originalName: file.name,
-        });
-        log('Saved character extension data', saved);
-        toastr?.success?.('已上传并绑定到当前角色', 'VRM Pet');
-        refreshCurrentBindingText();
+        await handleUploadSelectedFile();
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('[VRM Pet] Upload failed', err);
@@ -402,10 +438,10 @@ function bindCharacterChangeRefresh() {
 function init() {
   initConfig();
   createSettingsInterface();
+  refreshSelectedFileText();
   ensureOverlay();
   bindCharacterChangeRefresh();
   log('Initialized');
 }
 
 $(document).ready(() => init());
-
