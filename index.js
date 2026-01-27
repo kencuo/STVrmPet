@@ -8,6 +8,10 @@
 import { getContext } from '/scripts/extensions.js';
 import { getStringHash } from '/scripts/utils.js';
 
+import * as THREE from './vendor/three.module.js';
+import { GLTFLoader } from './vendor/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js';
+
 const MODULE_NAME = 'vrm-pet';
 
 const DEFAULT_CONFIG = {
@@ -22,6 +26,20 @@ const DEFAULT_CONFIG = {
 };
 
 let pluginConfig = {};
+
+const vrmRenderState = {
+  initialized: false,
+  initPromise: null,
+  renderer: null,
+  scene: null,
+  camera: null,
+  clock: null,
+  rafId: null,
+  resizeObserver: null,
+  currentVrm: null,
+  currentUrl: '',
+  loadingToken: 0,
+};
 
 function log(...args) {
   if (pluginConfig.enableLogging) console.log('[VRM Pet]', ...args);
@@ -74,6 +92,7 @@ function ensureOverlay() {
 
   if (!pluginConfig.enabled || !pluginConfig.showOverlay) {
     if (el) el.remove();
+    stopRenderLoop();
     return;
   }
 
@@ -82,7 +101,8 @@ function ensureOverlay() {
     el.id = 'vrm-pet-overlay';
     el.innerHTML = `
       <div class="vrm-pet-shell" title="Drag to move">
-        <div class="vrm-pet-hint">VRM Pet 占位框（后续接 three-vrm 渲染）<br/>拖动可移动</div>
+        <div class="vrm-pet-stage"></div>
+        <div class="vrm-pet-hint" id="vrm-pet-hint">未加载模型<br/>可在设置里上传并绑定 VRM</div>
       </div>
     `;
     document.body.appendChild(el);
@@ -106,10 +126,23 @@ function ensureOverlay() {
   }
 
   bindOverlayDrag(el);
+
+  // Ensure renderer is mounted once overlay exists.
+  ensureRenderer(el).catch((err) => {
+    console.error('[VRM Pet] Renderer init failed', err);
+    setHint(`渲染初始化失败：${err instanceof Error ? err.message : String(err)}`);
+  });
 }
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
+}
+
+function setHint(text) {
+  const el = document.getElementById('vrm-pet-hint');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.display = text ? 'grid' : 'none';
 }
 
 function bindOverlayDrag(overlayEl) {
@@ -166,6 +199,193 @@ function bindOverlayDrag(overlayEl) {
 
   shell.addEventListener('pointerup', stop);
   shell.addEventListener('pointercancel', stop);
+}
+
+function stopRenderLoop() {
+  if (vrmRenderState.rafId) {
+    cancelAnimationFrame(vrmRenderState.rafId);
+    vrmRenderState.rafId = null;
+  }
+  if (vrmRenderState.resizeObserver) {
+    try {
+      vrmRenderState.resizeObserver.disconnect();
+    } catch (_) {}
+    vrmRenderState.resizeObserver = null;
+  }
+}
+
+function disposeCurrentVrm() {
+  if (!vrmRenderState.scene) return;
+  if (!vrmRenderState.currentVrm) return;
+
+  try {
+    vrmRenderState.scene.remove(vrmRenderState.currentVrm.scene);
+    // Dispose GPU resources as much as possible.
+    VRMUtils.deepDispose(vrmRenderState.currentVrm.scene);
+  } catch (e) {
+    console.warn('[VRM Pet] Failed disposing VRM', e);
+  }
+
+  vrmRenderState.currentVrm = null;
+  vrmRenderState.currentUrl = '';
+}
+
+function resizeRendererToOverlay(overlayEl) {
+  const stage = overlayEl.querySelector('.vrm-pet-stage');
+  if (!stage) return;
+  if (!vrmRenderState.renderer || !vrmRenderState.camera) return;
+
+  const w = stage.clientWidth || overlayEl.clientWidth || 1;
+  const h = stage.clientHeight || overlayEl.clientHeight || 1;
+
+  vrmRenderState.renderer.setSize(w, h, false);
+  vrmRenderState.camera.aspect = w / h;
+  vrmRenderState.camera.updateProjectionMatrix();
+}
+
+async function ensureRenderer(overlayEl) {
+  if (vrmRenderState.initialized) return;
+  if (vrmRenderState.initPromise) return vrmRenderState.initPromise;
+
+  vrmRenderState.initPromise = (async () => {
+    const stage = overlayEl.querySelector('.vrm-pet-stage');
+    if (!stage) throw new Error('Overlay stage not found');
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x000000, 0);
+    stage.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 1000);
+    camera.position.set(0, 1.4, 2.2);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.65);
+    scene.add(ambient);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.85);
+    dir.position.set(1, 2, 3);
+    scene.add(dir);
+
+    vrmRenderState.renderer = renderer;
+    vrmRenderState.scene = scene;
+    vrmRenderState.camera = camera;
+    vrmRenderState.clock = new THREE.Clock();
+    vrmRenderState.initialized = true;
+
+    resizeRendererToOverlay(overlayEl);
+
+    // Keep renderer sized to the overlay.
+    vrmRenderState.resizeObserver = new ResizeObserver(() => resizeRendererToOverlay(overlayEl));
+    vrmRenderState.resizeObserver.observe(overlayEl);
+
+    startRenderLoop();
+  })();
+
+  return vrmRenderState.initPromise;
+}
+
+function startRenderLoop() {
+  if (vrmRenderState.rafId) return;
+  if (!vrmRenderState.renderer || !vrmRenderState.scene || !vrmRenderState.camera || !vrmRenderState.clock) return;
+
+  const tick = () => {
+    vrmRenderState.rafId = requestAnimationFrame(tick);
+    const delta = vrmRenderState.clock.getDelta();
+    if (vrmRenderState.currentVrm) {
+      try {
+        vrmRenderState.currentVrm.update(delta);
+      } catch (_) {}
+    }
+    vrmRenderState.renderer.render(vrmRenderState.scene, vrmRenderState.camera);
+  };
+
+  vrmRenderState.rafId = requestAnimationFrame(tick);
+}
+
+function fitCameraToObject(object3d) {
+  if (!vrmRenderState.camera) return;
+
+  const box = new THREE.Box3().setFromObject(object3d);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+
+  // Recenter the model to origin for stable camera/lighting.
+  object3d.position.sub(center);
+
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const camZ = maxDim * 1.6;
+  vrmRenderState.camera.near = Math.max(0.01, camZ / 100);
+  vrmRenderState.camera.far = camZ * 100;
+  vrmRenderState.camera.position.set(0, maxDim * 0.15, camZ);
+  vrmRenderState.camera.lookAt(0, maxDim * 0.12, 0);
+  vrmRenderState.camera.updateProjectionMatrix();
+}
+
+async function loadVrmFromUrl(url) {
+  const overlayEl = document.getElementById('vrm-pet-overlay');
+  if (!overlayEl) return;
+
+  await ensureRenderer(overlayEl);
+
+  const normalizedUrl = String(url || '').trim();
+  if (!normalizedUrl) {
+    disposeCurrentVrm();
+    setHint('当前角色未绑定 VRM\n可在设置里上传并绑定');
+    return;
+  }
+
+  if (normalizedUrl === vrmRenderState.currentUrl) {
+    // Already loaded.
+    setHint('');
+    return;
+  }
+
+  // Cancel previous load attempts (best-effort).
+  const token = ++vrmRenderState.loadingToken;
+
+  setHint('正在加载 VRM…');
+  disposeCurrentVrm();
+
+  const loader = new GLTFLoader();
+  loader.register((parser) => new VRMLoaderPlugin(parser));
+
+  return new Promise((resolve) => {
+    loader.load(
+      normalizedUrl,
+      (gltf) => {
+        if (token !== vrmRenderState.loadingToken) return resolve();
+        try {
+          const vrm = gltf.userData.vrm;
+          if (!vrm) throw new Error('Not a VRM (missing gltf.userData.vrm)');
+
+          // Optimize and normalize orientation.
+          VRMUtils.removeUnnecessaryJoints(vrm.scene);
+          try {
+            VRMUtils.removeUnnecessaryVertices(vrm.scene);
+          } catch (_) {}
+          VRMUtils.rotateVRM0(vrm);
+
+          vrmRenderState.scene.add(vrm.scene);
+          vrmRenderState.currentVrm = vrm;
+          vrmRenderState.currentUrl = normalizedUrl;
+          fitCameraToObject(vrm.scene);
+          setHint('');
+          log('VRM loaded', normalizedUrl);
+        } catch (e) {
+          console.error('[VRM Pet] VRM init failed', e);
+          setHint(`模型初始化失败：${e instanceof Error ? e.message : String(e)}`);
+        }
+        resolve();
+      },
+      undefined,
+      (err) => {
+        if (token !== vrmRenderState.loadingToken) return resolve();
+        console.error('[VRM Pet] VRM load failed', err);
+        setHint('加载失败：请确认 VRM 已上传成功且路径可访问');
+        resolve();
+      },
+    );
+  });
 }
 
 function readFileAsBase64(file) {
@@ -344,6 +564,7 @@ async function handleUploadSelectedFile() {
   log('Saved character extension data', saved);
   toastr?.success?.('已上传并绑定到当前角色', 'VRM Pet');
   refreshCurrentBindingText();
+  loadVrmForCurrentCharacter().catch(() => {});
 }
 
 function bindSettingsEvents() {
@@ -431,8 +652,16 @@ function bindCharacterChangeRefresh() {
   for (const ev of events) {
     ctx.eventSource.on(ev, () => {
       refreshCurrentBindingText();
+      loadVrmForCurrentCharacter().catch(() => {});
     });
   }
+}
+
+async function loadVrmForCurrentCharacter() {
+  const character = getCurrentCharacter();
+  const ext = character ? getCharacterExtensionData(character) : null;
+  const url = ext?.vrm?.url || '';
+  await loadVrmFromUrl(url);
 }
 
 function init() {
@@ -441,6 +670,7 @@ function init() {
   refreshSelectedFileText();
   ensureOverlay();
   bindCharacterChangeRefresh();
+  loadVrmForCurrentCharacter().catch(() => {});
   log('Initialized');
 }
 
