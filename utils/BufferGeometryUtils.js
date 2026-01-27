@@ -1,3 +1,4 @@
+// NOTE: Keep `?v=` in sync with other local vendor imports to avoid multiple Three.js instances.
 import {
 	BufferAttribute,
 	BufferGeometry,
@@ -9,7 +10,7 @@ import {
 	TriangleStripDrawMode,
 	TrianglesDrawMode,
 	Vector3,
-} from '../vendor/three.module.js';
+} from '../vendor/three.module.js?v=2026012707';
 
 function computeMikkTSpaceTangents( geometry, MikkTSpace, negateSign = true ) {
 
