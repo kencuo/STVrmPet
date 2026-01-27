@@ -26,6 +26,10 @@ const DEFAULT_CONFIG = {
     overlayHeight: 240,
     // Scales the loaded VRM model (relative).
     modelScale: 1.0,
+    // Make the pet window wander around the desktop.
+    wanderEnabled: false,
+    // Pixels per second.
+    wanderSpeed: 80,
     // persisted per-user overlay position (in viewport px). If null, use bottom-right default.
     overlayPos: null,
     enableLogging: false,
@@ -54,6 +58,11 @@ const vrmRenderState = {
     },
     stageInteractionBound: false,
     actionTriggersBound: false,
+    wander: {
+        vx: 1,
+        vy: 0,
+        pausedUntil: 0,
+    },
 };
 
 function log(...args) {
@@ -189,6 +198,9 @@ function bindOverlayDrag(overlayEl) {
 
         const rect = overlayEl.getBoundingClientRect();
         start = { x: e.clientX, y: e.clientY, left: rect.left, top: rect.top };
+
+        // Pause wandering while user interacts.
+        vrmRenderState.wander.pausedUntil = performance.now() + 2000;
     });
 
     shell.addEventListener("pointermove", (e) => {
@@ -255,6 +267,64 @@ function stopRenderLoop() {
         } catch (_) {}
         vrmRenderState.resizeObserver = null;
     }
+}
+
+function updateWander(delta) {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    if (!pluginConfig.wanderEnabled) return;
+
+    const now = performance.now();
+    if (now < (vrmRenderState.wander.pausedUntil || 0)) return;
+
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    if (!overlayEl) return;
+
+    const w = overlayEl.offsetWidth || (Number(pluginConfig.overlayWidth) || 240);
+    const h = overlayEl.offsetHeight || (Number(pluginConfig.overlayHeight) || 240);
+
+    // Keep it inside viewport with a small margin.
+    const margin = 14;
+    const maxX = Math.max(margin, window.innerWidth - w - margin);
+    const maxY = Math.max(margin, window.innerHeight - h - margin);
+
+    let x = typeof pluginConfig.overlayPos?.x === "number" ? pluginConfig.overlayPos.x : maxX;
+    let y = typeof pluginConfig.overlayPos?.y === "number" ? pluginConfig.overlayPos.y : maxY;
+
+    const speed = Math.max(10, Number(pluginConfig.wanderSpeed) || 80);
+    const dx = (vrmRenderState.wander.vx || 1) * speed * delta;
+    const dy = (vrmRenderState.wander.vy || 0) * speed * delta;
+
+    x += dx;
+    y += dy;
+
+    // Bounce on edges.
+    if (x <= margin) {
+        x = margin;
+        vrmRenderState.wander.vx = 1;
+    } else if (x >= maxX) {
+        x = maxX;
+        vrmRenderState.wander.vx = -1;
+    }
+
+    // Default: keep near bottom if user never set a y.
+    if (pluginConfig.overlayPos == null || typeof pluginConfig.overlayPos?.y !== "number") {
+        y = maxY;
+    } else {
+        if (y <= margin) {
+            y = margin;
+            vrmRenderState.wander.vy = 1;
+        } else if (y >= maxY) {
+            y = maxY;
+            vrmRenderState.wander.vy = -1;
+        }
+    }
+
+    overlayEl.style.left = `${Math.round(x)}px`;
+    overlayEl.style.top = `${Math.round(y)}px`;
+    overlayEl.style.right = "auto";
+    overlayEl.style.bottom = "auto";
+
+    pluginConfig.overlayPos = { x: Math.round(x), y: Math.round(y) };
 }
 
 function replaceVrmMaterialsForCompatibility(root) {
@@ -538,6 +608,7 @@ function startRenderLoop() {
             } catch (_) {}
         }
         updatePetAction(delta);
+        updateWander(delta);
         vrmRenderState.renderer.render(
             vrmRenderState.scene,
             vrmRenderState.camera,
@@ -1100,6 +1171,26 @@ function createSettingsInterface() {
             </div>
           </div>
 
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">桌面走动</div>
+              <div class="settings-title-description">让桌宠窗口在屏幕内来回走动（拖拽/点击会暂时暂停）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_wander_enabled" class="toggle-input" ${pluginConfig.wanderEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_wander_enabled" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">走动速度：<span id="${MODULE_NAME}_wander_speed_val">${Number(pluginConfig.wanderSpeed) || 80}</span> px/s</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_wander_speed" min="20" max="260" step="10" value="${Number(pluginConfig.wanderSpeed) || 80}">
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -1190,6 +1281,12 @@ function bindSettingsEvents() {
             ).checked;
             saveSettings();
         }
+        if (t.id === `${MODULE_NAME}_wander_enabled`) {
+            pluginConfig.wanderEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            // Nudge it to start moving soon.
+            vrmRenderState.wander.pausedUntil = performance.now() + 200;
+            saveSettings();
+        }
 
         // Auto-upload after file picked (button click opens the picker).
         if (t.id === `${MODULE_NAME}_file`) {
@@ -1258,6 +1355,14 @@ function bindSettingsEvents() {
             if (out) out.textContent = Number(pluginConfig.modelScale || 1).toFixed(2);
             saveSettings();
             applyModelScaleAndRefit();
+        }
+
+        if (t.id === `${MODULE_NAME}_wander_speed`) {
+            const v = parseInt(/** @type {HTMLInputElement} */ (t).value, 10);
+            pluginConfig.wanderSpeed = Number.isFinite(v) ? v : DEFAULT_CONFIG.wanderSpeed;
+            const out = document.getElementById(`${MODULE_NAME}_wander_speed_val`);
+            if (out) out.textContent = String(pluginConfig.wanderSpeed);
+            saveSettings();
         }
     });
 
