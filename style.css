@@ -28,6 +28,7 @@
 }
 
 #vrm-pet-overlay .vrm-pet-shell {
+  position: relative;
   width: 100%;
   height: 100%;
   border-radius: 14px;
@@ -38,12 +39,29 @@
   place-items: center;
   user-select: none;
   touch-action: none; /* required for pointer-drag on mobile */
+  overflow: hidden;
+}
+
+#vrm-pet-overlay .vrm-pet-stage {
+  position: absolute;
+  inset: 0;
+}
+
+#vrm-pet-overlay canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 #vrm-pet-overlay .vrm-pet-shell .vrm-pet-hint {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
   font-size: 12px;
   opacity: 0.9;
   padding: 10px;
   text-align: center;
+  background: rgba(0, 0, 0, 0.15);
+  pointer-events: none;
 }
-
