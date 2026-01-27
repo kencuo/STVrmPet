@@ -11,8 +11,8 @@ import { getStringHash } from "/scripts/utils.js";
 // NOTE: Keep `?v=` in sync across local vendor modules to avoid duplicate module instances in the browser cache.
 import { GLTFLoader } from "./vendor/GLTFLoader.js?v=2026012707";
 import {
-  VRMLoaderPlugin,
-  VRMUtils,
+    VRMLoaderPlugin,
+    VRMUtils,
 } from "./vendor/three-vrm.module.js?v=2026012707";
 import * as THREE from "./vendor/three.module.js?v=2026012707";
 
@@ -24,6 +24,8 @@ const DEFAULT_CONFIG = {
     showOverlay: true,
     overlayWidth: 240,
     overlayHeight: 240,
+    // Scales the loaded VRM model (relative).
+    modelScale: 1.0,
     // persisted per-user overlay position (in viewport px). If null, use bottom-right default.
     overlayPos: null,
     enableLogging: false,
@@ -517,20 +519,48 @@ function startRenderLoop() {
 function fitCameraToObject(object3d) {
     if (!vrmRenderState.camera) return;
 
+    const cam = vrmRenderState.camera;
+
     const box = new THREE.Box3().setFromObject(object3d);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
 
-    // Recenter the model to origin for stable camera/lighting.
-    object3d.position.sub(center);
+    // For a "pet overlay", keep feet visible:
+    // center on XZ, but align the bottom of the model to y=0.
+    const bottomCenter = new THREE.Vector3(center.x, box.min.y, center.z);
+    object3d.position.sub(bottomCenter);
+    object3d.updateMatrixWorld(true);
 
-    const maxDim = Math.max(size.x, size.y, size.z) || 1;
-    const camZ = maxDim * 1.6;
-    vrmRenderState.camera.near = Math.max(0.01, camZ / 100);
-    vrmRenderState.camera.far = camZ * 100;
-    vrmRenderState.camera.position.set(0, maxDim * 0.15, camZ);
-    vrmRenderState.camera.lookAt(0, maxDim * 0.12, 0);
-    vrmRenderState.camera.updateProjectionMatrix();
+    // Fit camera to bounding box based on FOV & aspect.
+    const fov = THREE.MathUtils.degToRad(cam.fov);
+    const fitHeight = size.y / (2 * Math.tan(fov / 2));
+    const fitWidth = size.x / (2 * Math.tan(fov / 2)) / (cam.aspect || 1);
+    const distance = 1.25 * Math.max(fitHeight, fitWidth, size.z);
+
+    cam.near = Math.max(0.01, distance / 100);
+    cam.far = distance * 100;
+    cam.position.set(0, Math.max(0.1, size.y * 0.6), distance);
+    cam.lookAt(0, Math.max(0.05, size.y * 0.55), 0);
+    cam.updateProjectionMatrix();
+}
+
+function applyModelScaleAndRefit() {
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+
+    const base = vrm.scene?.userData?.__vrmPetBaseTransform ?? null;
+    if (base) {
+        vrm.scene.position.copy(base.position);
+        vrm.scene.quaternion.copy(base.quaternion);
+        vrm.scene.scale.copy(base.scale);
+    }
+
+    const v = Number(pluginConfig.modelScale);
+    const scale = Number.isFinite(v) && v > 0 ? v : 1.0;
+    vrm.scene.scale.multiplyScalar(scale);
+    vrm.scene.updateMatrixWorld(true);
+
+    fitCameraToObject(vrm.scene);
 }
 
 async function loadVrmFromUrl(url) {
@@ -582,10 +612,19 @@ async function loadVrmFromUrl(url) {
                     // Workaround: avoid incompatible MToon shaders and make sure colors are visible.
                     replaceVrmMaterialsForCompatibility(vrm.scene);
 
-                    vrmRenderState.scene.add(vrm.scene);
+                    // Store a stable baseline transform so refitting/scale changes don't accumulate offsets.
+                    vrm.scene.updateMatrixWorld(true);
+                    vrm.scene.userData.__vrmPetBaseTransform = {
+                        position: vrm.scene.position.clone(),
+                        quaternion: vrm.scene.quaternion.clone(),
+                        scale: vrm.scene.scale.clone(),
+                    };
+
                     vrmRenderState.currentVrm = vrm;
+                    applyModelScaleAndRefit();
+
+                    vrmRenderState.scene.add(vrm.scene);
                     vrmRenderState.currentUrl = normalizedUrl;
-                    fitCameraToObject(vrm.scene);
                     setHint("");
                     log("VRM loaded", normalizedUrl);
                 } catch (e) {
@@ -735,6 +774,35 @@ function createSettingsInterface() {
             </div>
           </div>
 
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">Overlay size: <span id="${MODULE_NAME}_overlay_size_val">${pluginConfig.overlayWidth}×${pluginConfig.overlayHeight}</span></div>
+              <div class="range-row">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span style="min-width:64px;">Width</span>
+                  <input type="range" id="${MODULE_NAME}_overlay_w" min="120" max="800" step="10" value="${pluginConfig.overlayWidth}">
+                  <span id="${MODULE_NAME}_overlay_w_val" style="min-width:48px; text-align:right;">${pluginConfig.overlayWidth}</span>
+                </div>
+              </div>
+              <div class="range-row">
+                <div style="display:flex; align-items:center; gap:8px;">
+                  <span style="min-width:64px;">Height</span>
+                  <input type="range" id="${MODULE_NAME}_overlay_h" min="120" max="800" step="10" value="${pluginConfig.overlayHeight}">
+                  <span id="${MODULE_NAME}_overlay_h_val" style="min-width:48px; text-align:right;">${pluginConfig.overlayHeight}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">Model scale: <span id="${MODULE_NAME}_model_scale_val">${Number(pluginConfig.modelScale || 1).toFixed(2)}</span>x</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_model_scale" min="0.5" max="3.0" step="0.05" value="${pluginConfig.modelScale}">
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -848,6 +916,51 @@ function bindSettingsEvents() {
             const out = document.getElementById(`${MODULE_NAME}_max_mb_val`);
             if (out) out.textContent = String(pluginConfig.maxVrmFileSizeMB);
             saveSettings();
+        }
+
+        if (t.id === `${MODULE_NAME}_overlay_w`) {
+            const v = parseInt(/** @type {HTMLInputElement} */ (t).value, 10);
+            pluginConfig.overlayWidth = Number.isFinite(v)
+                ? v
+                : DEFAULT_CONFIG.overlayWidth;
+            const out = document.getElementById(`${MODULE_NAME}_overlay_w_val`);
+            if (out) out.textContent = String(pluginConfig.overlayWidth);
+            const out2 = document.getElementById(
+                `${MODULE_NAME}_overlay_size_val`,
+            );
+            if (out2)
+                out2.textContent = `${pluginConfig.overlayWidth}×${pluginConfig.overlayHeight}`;
+            saveSettings();
+            ensureOverlay();
+        }
+
+        if (t.id === `${MODULE_NAME}_overlay_h`) {
+            const v = parseInt(/** @type {HTMLInputElement} */ (t).value, 10);
+            pluginConfig.overlayHeight = Number.isFinite(v)
+                ? v
+                : DEFAULT_CONFIG.overlayHeight;
+            const out = document.getElementById(`${MODULE_NAME}_overlay_h_val`);
+            if (out) out.textContent = String(pluginConfig.overlayHeight);
+            const out2 = document.getElementById(
+                `${MODULE_NAME}_overlay_size_val`,
+            );
+            if (out2)
+                out2.textContent = `${pluginConfig.overlayWidth}×${pluginConfig.overlayHeight}`;
+            saveSettings();
+            ensureOverlay();
+        }
+
+        if (t.id === `${MODULE_NAME}_model_scale`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            pluginConfig.modelScale = Number.isFinite(v)
+                ? v
+                : DEFAULT_CONFIG.modelScale;
+            const out = document.getElementById(
+                `${MODULE_NAME}_model_scale_val`,
+            );
+            if (out) out.textContent = Number(pluginConfig.modelScale || 1).toFixed(2);
+            saveSettings();
+            applyModelScaleAndRefit();
         }
     });
 
