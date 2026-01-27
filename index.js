@@ -9,9 +9,9 @@ import { getContext } from '/scripts/extensions.js';
 import { getStringHash } from '/scripts/utils.js';
 
 // NOTE: Keep `?v=` in sync across local vendor modules to avoid duplicate module instances in the browser cache.
-import * as THREE from './vendor/three.module.js?v=2026012705';
-import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012705';
-import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012705';
+import * as THREE from './vendor/three.module.js?v=2026012706';
+import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012706';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012706';
 
 const MODULE_NAME = 'vrm-pet';
 
@@ -253,6 +253,23 @@ function replaceVrmMaterialsForCompatibility(root) {
 
     const nextMats = mats.map((m) => {
       if (!m) return m;
+
+      // If the mesh uses multi-material and one of them is an outline material, make it fully invisible.
+      // Otherwise it can overwrite the base draw with a solid color.
+      if (isOutlineLike(m)) {
+        changed = true;
+        replacedCount++;
+        const invisible = new THREE.MeshBasicMaterial({
+          color: 0x000000,
+          transparent: true,
+          opacity: 0.0,
+          depthWrite: false,
+          depthTest: m.depthTest,
+          side: m.side ?? THREE.DoubleSide,
+        });
+        if (obj.isSkinnedMesh) invisible.skinning = true;
+        return invisible;
+      }
 
       const isMToon = !!(m.isShaderMaterial && m.isMToonMaterial);
       const isPbr = !!(m.isMeshStandardMaterial || m.isMeshPhysicalMaterial);
