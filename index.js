@@ -45,6 +45,15 @@ const vrmRenderState = {
     currentVrm: null,
     currentUrl: "",
     loadingToken: 0,
+    // Simple procedural "pet actions" (no external animation clips required).
+    petAction: {
+        active: null,
+        t: 0,
+        duration: 0,
+        cooldownUntil: 0,
+    },
+    stageInteractionBound: false,
+    actionTriggersBound: false,
 };
 
 function log(...args) {
@@ -165,25 +174,37 @@ function bindOverlayDrag(overlayEl) {
     if (shell.__vrmPetDragBound) return;
     shell.__vrmPetDragBound = true;
 
+    // Start dragging only after a small move threshold, so clicking the model can trigger actions.
     let dragging = false;
+    let captured = false;
     let pointerId = null;
     let start = null;
+    const DRAG_THRESHOLD_PX = 6;
 
     shell.addEventListener("pointerdown", (e) => {
         if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
-        dragging = true;
+        dragging = false;
+        captured = false;
         pointerId = e.pointerId;
-        shell.setPointerCapture(pointerId);
 
         const rect = overlayEl.getBoundingClientRect();
         start = { x: e.clientX, y: e.clientY, left: rect.left, top: rect.top };
-        e.preventDefault();
     });
 
     shell.addEventListener("pointermove", (e) => {
-        if (!dragging || pointerId !== e.pointerId || !start) return;
+        if (pointerId !== e.pointerId || !start) return;
         const dx = e.clientX - start.x;
         const dy = e.clientY - start.y;
+
+        if (!dragging) {
+            if (Math.hypot(dx, dy) < DRAG_THRESHOLD_PX) return;
+            dragging = true;
+            try {
+                shell.setPointerCapture(pointerId);
+                captured = true;
+            } catch (_) {}
+            e.preventDefault();
+        }
 
         const w = overlayEl.offsetWidth;
         const h = overlayEl.offsetHeight;
@@ -200,10 +221,18 @@ function bindOverlayDrag(overlayEl) {
     });
 
     const stop = async (e) => {
-        if (!dragging || pointerId !== e.pointerId) return;
+        if (pointerId !== e.pointerId) return;
+        const didDrag = dragging;
         dragging = false;
+        if (captured) {
+            try {
+                shell.releasePointerCapture(pointerId);
+            } catch (_) {}
+        }
+        captured = false;
         pointerId = null;
         start = null;
+        if (!didDrag) return;
         try {
             const ctx = getContext();
             ctx.extensionSettings[MODULE_NAME] = pluginConfig;
@@ -484,6 +513,7 @@ async function ensureRenderer(overlayEl) {
         vrmRenderState.resizeObserver.observe(overlayEl);
 
         startRenderLoop();
+        bindStageInteractions(overlayEl);
     })();
 
     return vrmRenderState.initPromise;
@@ -507,6 +537,7 @@ function startRenderLoop() {
                 vrmRenderState.currentVrm.update(delta);
             } catch (_) {}
         }
+        updatePetAction(delta);
         vrmRenderState.renderer.render(
             vrmRenderState.scene,
             vrmRenderState.camera,
@@ -514,6 +545,271 @@ function startRenderLoop() {
     };
 
     vrmRenderState.rafId = requestAnimationFrame(tick);
+}
+
+// -----------------------------
+// Procedural "pet actions"
+// -----------------------------
+
+function easeInOutSine(t) {
+    return 0.5 - 0.5 * Math.cos(Math.PI * t);
+}
+
+function clamp01(t) {
+    return Math.max(0, Math.min(1, t));
+}
+
+function initPetActionRig(vrm) {
+    // Cache bone nodes + their "rest" transforms so actions don't accumulate drift.
+    const humanoid = vrm?.humanoid;
+    const getBone = (name) => {
+        try {
+            return humanoid?.getRawBoneNode?.(name) ?? null;
+        } catch (_) {
+            return null;
+        }
+    };
+
+    const boneNames = [
+        "hips",
+        "spine",
+        "chest",
+        "upperChest",
+        "neck",
+        "head",
+        "leftUpperArm",
+        "leftLowerArm",
+        "rightUpperArm",
+        "rightLowerArm",
+    ];
+
+    const bones = {};
+    const rest = {};
+    for (const n of boneNames) {
+        const node = getBone(n);
+        if (!node) continue;
+        bones[n] = node;
+        rest[n] = {
+            position: node.position.clone(),
+            quaternion: node.quaternion.clone(),
+        };
+    }
+
+    vrm.scene.userData.__vrmPetBones = bones;
+    vrm.scene.userData.__vrmPetBoneRest = rest;
+}
+
+function resetPetRigToRest(vrm) {
+    const rest = vrm?.scene?.userData?.__vrmPetBoneRest ?? null;
+    const bones = vrm?.scene?.userData?.__vrmPetBones ?? null;
+    if (!rest || !bones) return;
+    for (const [name, st] of Object.entries(rest)) {
+        const node = bones[name];
+        if (!node) continue;
+        node.position.copy(st.position);
+        node.quaternion.copy(st.quaternion);
+    }
+}
+
+function playPetAction(actionName) {
+    const now = performance.now();
+    if (now < vrmRenderState.petAction.cooldownUntil) return;
+    if (!vrmRenderState.currentVrm) return;
+
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm.scene.userData.__vrmPetBones) initPetActionRig(vrm);
+
+    // Do not stack; restart from rest each time for predictable results.
+    resetPetRigToRest(vrm);
+
+    let duration = 0.8;
+    if (actionName === "tap") duration = 0.55;
+    if (actionName === "nod") duration = 0.8;
+    if (actionName === "bounce") duration = 0.7;
+    if (actionName === "wave") duration = 1.0;
+
+    vrmRenderState.petAction.active = actionName;
+    vrmRenderState.petAction.t = 0;
+    vrmRenderState.petAction.duration = duration;
+    vrmRenderState.petAction.cooldownUntil = now + 250; // prevent double-trigger by pointer events
+}
+
+function playRandomPetAction(kind = "gen") {
+    // Small set of "cute" actions.
+    const pool = kind === "tap" ? ["tap", "nod", "wave"] : ["nod", "bounce", "wave"];
+    const idx = Math.floor(Math.random() * pool.length);
+    playPetAction(pool[idx]);
+}
+
+function updatePetAction(delta) {
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+
+    const a = vrmRenderState.petAction.active;
+    if (!a) return;
+
+    const bones = vrm.scene.userData.__vrmPetBones ?? null;
+    const rest = vrm.scene.userData.__vrmPetBoneRest ?? null;
+    if (!bones || !rest) return;
+
+    vrmRenderState.petAction.t += delta;
+    const t = vrmRenderState.petAction.t;
+    const d = Math.max(0.001, vrmRenderState.petAction.duration);
+    const p = clamp01(t / d);
+    const e = easeInOutSine(p);
+
+    // Re-apply rest every frame, then layer our small offsets (so VRM updates don't drift us).
+    resetPetRigToRest(vrm);
+
+    const qTmp = new THREE.Quaternion();
+    const eTmp = new THREE.Euler();
+
+    const head = bones.head;
+    const neck = bones.neck;
+    const hips = bones.hips;
+    const rUA = bones.rightUpperArm;
+    const rLA = bones.rightLowerArm;
+    const lUA = bones.leftUpperArm;
+
+    if (a === "tap") {
+        // Tiny bounce + quick nod.
+        if (hips && rest.hips) {
+            const amp = 0.04;
+            hips.position.y = rest.hips.position.y + amp * Math.sin(Math.PI * p) * (1.0 - 0.2 * p);
+        }
+        if (head) {
+            const amp = THREE.MathUtils.degToRad(10);
+            eTmp.set(-amp * Math.sin(Math.PI * p), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            head.quaternion.multiply(qTmp);
+        }
+    } else if (a === "nod") {
+        if (head) {
+            const amp = THREE.MathUtils.degToRad(18);
+            // two nods with envelope
+            const phase = Math.sin(p * Math.PI * 2 * 2);
+            eTmp.set(-amp * phase * (0.6 + 0.4 * (1 - p)), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            head.quaternion.multiply(qTmp);
+        }
+        if (neck) {
+            const amp = THREE.MathUtils.degToRad(8);
+            const phase = Math.sin(p * Math.PI * 2 * 2);
+            eTmp.set(-amp * phase * 0.7, 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            neck.quaternion.multiply(qTmp);
+        }
+    } else if (a === "bounce") {
+        if (hips && rest.hips) {
+            const amp = 0.07;
+            hips.position.y = rest.hips.position.y + amp * Math.sin(Math.PI * p) * (0.3 + 0.7 * (1 - p));
+        }
+        if (head) {
+            const amp = THREE.MathUtils.degToRad(6);
+            eTmp.set(-amp * Math.sin(Math.PI * p) * 0.8, 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            head.quaternion.multiply(qTmp);
+        }
+    } else if (a === "wave") {
+        // Simple right-hand wave. If missing right arm bones, fall back to nod.
+        if (!rUA) {
+            vrmRenderState.petAction.active = "nod";
+            return;
+        }
+        const wave = Math.sin(p * Math.PI * 2 * 3); // 3 swings
+        const ampZ = THREE.MathUtils.degToRad(35);
+        const ampY = THREE.MathUtils.degToRad(12);
+
+        eTmp.set(
+            0,
+            ampY * wave * (0.6 + 0.4 * (1 - p)),
+            ampZ * (0.7 + 0.3 * wave) * (0.5 + 0.5 * e),
+            "XYZ",
+        );
+        qTmp.setFromEuler(eTmp);
+        rUA.quaternion.multiply(qTmp);
+
+        if (rLA) {
+            const bend = THREE.MathUtils.degToRad(25);
+            eTmp.set(-bend * (0.2 + 0.8 * e), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rLA.quaternion.multiply(qTmp);
+        }
+
+        if (lUA) {
+            const amp = THREE.MathUtils.degToRad(10);
+            eTmp.set(0, 0, -amp * e, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lUA.quaternion.multiply(qTmp);
+        }
+    }
+
+    // Tiny blink near the end (if expressions exist).
+    try {
+        const em = vrm.expressionManager;
+        if (em?.setValue) {
+            const blink = p > 0.78 && p < 0.9 ? 1.0 : 0.0;
+            em.setValue("blink", blink);
+        }
+    } catch (_) {}
+
+    if (p >= 1) {
+        resetPetRigToRest(vrm);
+        vrmRenderState.petAction.active = null;
+        vrmRenderState.petAction.t = 0;
+        vrmRenderState.petAction.duration = 0;
+        vrmRenderState.petAction.cooldownUntil = performance.now() + 500;
+    }
+}
+
+function bindStageInteractions(overlayEl) {
+    if (vrmRenderState.stageInteractionBound) return;
+    if (!vrmRenderState.renderer || !vrmRenderState.camera) return;
+    const canvas = vrmRenderState.renderer.domElement;
+    if (!canvas) return;
+
+    vrmRenderState.stageInteractionBound = true;
+    canvas.style.touchAction = "none";
+
+    const raycaster = new THREE.Raycaster();
+    const ndc = new THREE.Vector2();
+
+    let down = null;
+    canvas.addEventListener("pointerdown", (e) => {
+        down = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId };
+    });
+
+    canvas.addEventListener("pointerup", (e) => {
+        if (!down || down.id !== e.pointerId) return;
+        const dx = e.clientX - down.x;
+        const dy = e.clientY - down.y;
+        const dt = performance.now() - down.t;
+        down = null;
+        // treat as "tap" (not drag) if movement small and quick
+        if (dt > 600 || Math.hypot(dx, dy) > 6) return;
+        if (!vrmRenderState.currentVrm) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) / Math.max(1, rect.width);
+        const y = (e.clientY - rect.top) / Math.max(1, rect.height);
+        ndc.set(x * 2 - 1, -(y * 2 - 1));
+        raycaster.setFromCamera(ndc, vrmRenderState.camera);
+        const hits = raycaster.intersectObject(vrmRenderState.currentVrm.scene, true);
+        if (hits && hits.length > 0) playRandomPetAction("tap");
+    });
+}
+
+function bindActionTriggers() {
+    if (vrmRenderState.actionTriggersBound) return;
+    const ctx = getContext();
+    if (!ctx?.eventSource || !ctx?.eventTypes) return;
+    vrmRenderState.actionTriggersBound = true;
+
+    ctx.eventSource.on(ctx.eventTypes.GENERATION_ENDED, () => {
+        if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+        if (!vrmRenderState.currentVrm) return;
+        playRandomPetAction("gen");
+    });
 }
 
 function fitCameraToObject(object3d) {
@@ -621,6 +917,7 @@ async function loadVrmFromUrl(url) {
                     };
 
                     vrmRenderState.currentVrm = vrm;
+                    initPetActionRig(vrm);
                     applyModelScaleAndRefit();
 
                     vrmRenderState.scene.add(vrm.scene);
@@ -1050,6 +1347,7 @@ function init() {
     refreshSelectedFileText();
     ensureOverlay();
     bindCharacterChangeRefresh();
+    bindActionTriggers();
     loadVrmForCurrentCharacter().catch(() => {});
     log("Initialized");
 }
