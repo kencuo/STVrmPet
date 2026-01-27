@@ -9,9 +9,9 @@ import { getContext } from '/scripts/extensions.js';
 import { getStringHash } from '/scripts/utils.js';
 
 // NOTE: Keep `?v=` in sync across local vendor modules to avoid duplicate module instances in the browser cache.
-import * as THREE from './vendor/three.module.js?v=20260127';
-import { GLTFLoader } from './vendor/GLTFLoader.js?v=20260127';
-import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=20260127';
+import * as THREE from './vendor/three.module.js?v=2026012702';
+import { GLTFLoader } from './vendor/GLTFLoader.js?v=2026012702';
+import { VRMLoaderPlugin, VRMUtils } from './vendor/three-vrm.module.js?v=2026012702';
 
 const MODULE_NAME = 'vrm-pet';
 
@@ -219,7 +219,7 @@ function replaceMToonMaterialsWithStandard(root) {
   if (!root) return;
 
   // @pixiv/three-vrm's MToonMaterial currently isn't compatible with our vendored Three r161 shader chunks.
-  // Fallback to MeshStandardMaterial so models render (skinning included).
+  // Fallback to MeshBasicMaterial so models render (skinning included) and colors are visible even without lighting.
   root.traverse((obj) => {
     if (!obj || !obj.isMesh) return;
 
@@ -230,29 +230,28 @@ function replaceMToonMaterialsWithStandard(root) {
       if (!m || !m.isShaderMaterial || !m.isMToonMaterial) return m;
       changed = true;
 
-      const std = new THREE.MeshStandardMaterial({
+      const base = new THREE.MeshBasicMaterial({
         color: m.color?.clone?.() ?? new THREE.Color(1, 1, 1),
         map: m.map ?? null,
-        normalMap: m.normalMap ?? null,
-        emissive: m.emissive?.clone?.() ?? new THREE.Color(0, 0, 0),
-        emissiveIntensity: typeof m.emissiveIntensity === 'number' ? m.emissiveIntensity : 1,
         transparent: !!m.transparent,
         opacity: typeof m.opacity === 'number' ? m.opacity : 1,
         side: m.side,
       });
 
-      // Common VRM defaults: non-metal.
-      std.metalness = 0;
-      std.roughness = 1;
+      // Ensure baseColor textures show correct colors (srgb).
+      if (base.map) {
+        base.map.colorSpace = THREE.SRGBColorSpace;
+        base.map.needsUpdate = true;
+      }
 
       // Skinned meshes need skinning enabled on the material.
-      if (obj.isSkinnedMesh) std.skinning = true;
+      if (obj.isSkinnedMesh) base.skinning = true;
 
-      if (typeof m.alphaTest === 'number') std.alphaTest = m.alphaTest;
-      std.depthWrite = m.depthWrite;
-      std.depthTest = m.depthTest;
+      if (typeof m.alphaTest === 'number') base.alphaTest = m.alphaTest;
+      base.depthWrite = m.depthWrite;
+      base.depthTest = m.depthTest;
 
-      return std;
+      return base;
     });
 
     if (!changed) return;
@@ -307,6 +306,8 @@ async function ensureRenderer(overlayEl) {
     if (!context) throw new Error('WebGL not supported');
 
     const renderer = new THREE.WebGLRenderer({ canvas, context, antialias: true, alpha: true });
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.NoToneMapping;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
     stage.appendChild(renderer.domElement);
