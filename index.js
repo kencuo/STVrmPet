@@ -314,7 +314,7 @@ function ensureOverlay() {
     ensureRenderer(el).catch((err) => {
         console.error("[VRM Pet] Renderer init failed", err);
         setHint(
-            `娓叉煋鍒濆鍖栧け璐ワ細${err instanceof Error ? err.message : String(err)}`,
+            `渲染初始化失败：${err instanceof Error ? err.message : String(err)}`,
         );
     });
 }
@@ -655,7 +655,7 @@ function showPetEditorModal(kind) {
     if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
     const character = getCurrentCharacter();
     if (!character) {
-        toastr?.warning?.("Select a character first (group chat not supported yet).", "VRM Pet");
+        toastr?.warning?.("请先选择一个角色（当前不支持群聊）", "VRM Pet");
         return;
     }
 
@@ -786,7 +786,9 @@ function renderPetChatMessages(container, messages, nameUser, namePet) {
     container.textContent = "";
 
     const frag = document.createDocumentFragment();
-    for (const m of messages || []) {
+    const arr = Array.isArray(messages) ? messages : [];
+    for (let i = 0; i < arr.length; i++) {
+        const m = arr[i];
         const row = document.createElement("div");
         row.className =
             m.role === "assistant" ? "vrm-pet-chat-msg assistant" : "vrm-pet-chat-msg user";
@@ -795,12 +797,25 @@ function renderPetChatMessages(container, messages, nameUser, namePet) {
         who.className = "vrm-pet-chat-who";
         who.textContent = m.role === "assistant" ? namePet : nameUser;
 
+        const wrap = document.createElement("div");
+        wrap.className = "vrm-pet-chat-bubble-wrap";
+
         const bubble = document.createElement("div");
         bubble.className = "vrm-pet-chat-bubble";
         bubble.textContent = String(m.text ?? "");
 
         row.appendChild(who);
-        row.appendChild(bubble);
+        wrap.appendChild(bubble);
+
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "vrm-pet-chat-del";
+        del.dataset.index = String(i);
+        del.title = "删除";
+        del.textContent = "×";
+        wrap.appendChild(del);
+
+        row.appendChild(wrap);
         frag.appendChild(row);
     }
     container.appendChild(frag);
@@ -815,7 +830,7 @@ function showPetChatModal() {
     if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
     const character = getCurrentCharacter();
     if (!character) {
-        toastr?.warning?.("璇峰厛閫夋嫨涓€涓鑹诧紙褰撳墠涓嶆敮鎸佺兢鑱婏級", "VRM Pet");
+        toastr?.warning?.("请先选择一个角色（当前不支持群聊）", "VRM Pet");
         return;
     }
 
@@ -924,6 +939,37 @@ function showPetChatModal() {
     };
 
     refresh();
+
+    body.addEventListener("click", async (e) => {
+        const t = e.target;
+        if (!(t instanceof HTMLElement)) return;
+        const btn = t.closest?.(".vrm-pet-chat-del");
+        if (!(btn instanceof HTMLElement)) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        const idx = Number(btn.dataset.index);
+        if (!Number.isFinite(idx)) return;
+
+        // Safer UX: confirm delete (Shift bypass).
+        const doDelete =
+            e instanceof MouseEvent && e.shiftKey
+                ? true
+                : confirm("删除这条消息？");
+        if (!doDelete) return;
+
+        try {
+            const data = getPetChatDataForCurrentCharacter();
+            const msgs = Array.isArray(data.messages) ? [...data.messages] : [];
+            if (idx < 0 || idx >= msgs.length) return;
+            msgs.splice(idx, 1);
+            await savePetChatMessagesForCurrentCharacter(msgs);
+            refresh();
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            toastr?.error?.(msg, "VRM Pet");
+        }
+    });
 
     const send = async () => {
         const text = String(ta.value ?? "").trim();
@@ -2807,7 +2853,7 @@ async function loadVrmFromUrl(url) {
     const normalizedUrl = String(url || "").trim();
     if (!normalizedUrl) {
         disposeCurrentVrm();
-        setHint("褰撳墠瑙掕壊鏈粦瀹?VRM\n鍙湪璁剧疆閲屼笂浼犲苟缁戝畾");
+        setHint("当前角色未绑定 VRM。\n可在设置里上传并绑定。");
         return;
     }
 
@@ -2866,7 +2912,7 @@ async function loadVrmFromUrl(url) {
                 } catch (e) {
                     console.error("[VRM Pet] VRM init failed", e);
                     setHint(
-                        `妯″瀷鍒濆鍖栧け璐ワ細${e instanceof Error ? e.message : String(e)}`,
+                        `模型初始化失败：${e instanceof Error ? e.message : String(e)}`,
                     );
                 }
                 resolve();
@@ -2966,8 +3012,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">鍚敤 VRM Pet</div>
-              <div class="settings-title-description">姣忎釜瑙掕壊鍙粦瀹氫竴涓?VRM锛涘彸涓嬭鏄剧ず妗屽疇锛堝彲鎷栧姩锛</div>
+              <div class="settings-title-text">启用 VRM Pet</div>
+              <div class="settings-title-description">每个角色可绑定一个 VRM；右下角显示桌宠（可拖动）</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_enabled" class="toggle-input" ${pluginConfig.enabled ? "checked" : ""} />
@@ -2977,8 +3023,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">璋冭瘯鏃ュ織</div>
-              <div class="settings-title-description">鍦ㄦ帶鍒跺彴杈撳嚭 VRM 鏉愯川/璐村浘淇℃伅锛堢敤浜庢帓鏌ラ粦褰?娌￠鑹诧級</div>
+              <div class="settings-title-text">调试日志</div>
+              <div class="settings-title-description">在控制台输出 VRM 材质/贴图信息</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_enableLogging" class="toggle-input" ${pluginConfig.enableLogging ? "checked" : ""} />
@@ -2988,13 +3034,13 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">涓哄綋鍓嶈鑹蹭笂浼?VRM</div>
-              <div class="settings-title-description">鏂囦欢浼氫繚瀛樺埌閰掗鏈嶅姟鍣紙/api/files/upload锛</div>
+              <div class="settings-title-text">为当前角色上传 VRM</div>
+              <div class="settings-title-description">文件会保存到酒馆服务器（/api/files/upload）</div>
               <div class="vrm-pet-row marginTop5">
                 <input type="file" id="${MODULE_NAME}_file" accept=".vrm" style="display:none" />
-                <button class="menu_button" id="${MODULE_NAME}_select_btn">閫夋嫨 VRM 骞朵笂浼?/button>
-                <button class="menu_button" id="${MODULE_NAME}_upload_btn" title="宸查€夋枃浠舵椂鍙敤">涓婁紶骞剁粦瀹?/button>
-                <button class="menu_button" id="${MODULE_NAME}_clear_btn">娓呴櫎褰撳墠瑙掕壊缁戝畾</button>
+                <button class="menu_button" id="${MODULE_NAME}_select_btn">选择 VRM</button>
+                <button class="menu_button" id="${MODULE_NAME}_upload_btn" title="已选文件时可用">上传并绑定</button>
+                <button class="menu_button" id="${MODULE_NAME}_clear_btn">清除当前角色绑定</button>
               </div>
               <div class="vrm-pet-path marginTop5" id="${MODULE_NAME}_selected"></div>
               <div class="vrm-pet-path marginTop5" id="${MODULE_NAME}_current"></div>
@@ -3003,7 +3049,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">VRM 澶у皬闄愬埗锛<span id="${MODULE_NAME}_max_mb_val">${pluginConfig.maxVrmFileSizeMB}</span>MB</div>
+              <div class="settings-title-text">VRM 大小限制：<span id="${MODULE_NAME}_max_mb_val">${pluginConfig.maxVrmFileSizeMB}</span>MB</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_max_mb" min="5" max="300" step="5" value="${pluginConfig.maxVrmFileSizeMB}">
               </div>
@@ -3032,8 +3078,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">鏄剧ず澶栨</div>
-              <div class="settings-title-description">鍏抽棴鍚庢瀹犲彧鏄剧ず妯″瀷锛堟洿鍍忊€滄棤杈规鈥濓級</div>
+              <div class="settings-title-text">显示外框</div>
+              <div class="settings-title-description">关闭后桌宠只显示模型</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_frame_enabled" class="toggle-input" ${pluginConfig.overlayFrameEnabled ? "checked" : ""} />
@@ -3043,7 +3089,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">澶栨閫忔槑搴︼細<span id="${MODULE_NAME}_frame_opacity_val">${Number.isFinite(Number(pluginConfig.overlayFrameOpacity)) ? Number(pluginConfig.overlayFrameOpacity).toFixed(2) : "0.35"}</span></div>
+              <div class="settings-title-text">外框透明度：<span id="${MODULE_NAME}_frame_opacity_val">${Number.isFinite(Number(pluginConfig.overlayFrameOpacity)) ? Number(pluginConfig.overlayFrameOpacity).toFixed(2) : "0.35"}</span></div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_frame_opacity" min="0" max="0.9" step="0.05" value="${Number.isFinite(Number(pluginConfig.overlayFrameOpacity)) ? Number(pluginConfig.overlayFrameOpacity) : 0.35}">
               </div>
@@ -3061,8 +3107,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">妗岄潰璧板姩</div>
-              <div class="settings-title-description">璁╂瀹犵獥鍙ｅ湪灞忓箷鍐呮潵鍥炶蛋鍔紙鎷栨嫿/鐐瑰嚮浼氭殏鏃舵殏鍋滐級</div>
+              <div class="settings-title-text">桌面走动</div>
+              <div class="settings-title-description">让桌宠窗口在屏幕内来回走动（拖拽/点击会暂时暂停）</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_wander_enabled" class="toggle-input" ${pluginConfig.wanderEnabled ? "checked" : ""} />
@@ -3072,7 +3118,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">璧板姩閫熷害锛<span id="${MODULE_NAME}_wander_speed_val">${Number(pluginConfig.wanderSpeed) || 80}</span> px/s</div>
+              <div class="settings-title-text">走动速度：<span id="${MODULE_NAME}_wander_speed_val">${Number(pluginConfig.wanderSpeed) || 80}</span> px/s</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_wander_speed" min="20" max="260" step="10" value="${Number(pluginConfig.wanderSpeed) || 80}">
               </div>
@@ -3081,8 +3127,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">璧拌矾鎽嗗姩</div>
-              <div class="settings-title-description">璧板姩鏃跺仛鈥滃師鍦拌蛋璺€濈殑鎽嗚噦/鐐瑰ご锛堜笉闇€瑕佸閮ㄥ姩浣滄枃浠讹級</div>
+              <div class="settings-title-text">走路摆动</div>
+              <div class="settings-title-description">走动时做“原地走路”的摆臂/点头</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_wander_gait_enabled" class="toggle-input" ${pluginConfig.wanderGaitEnabled ? "checked" : ""} />
@@ -3092,7 +3138,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">鎽嗗姩寮哄害锛<span id="${MODULE_NAME}_wander_gait_intensity_val">${Number(pluginConfig.wanderGaitIntensity ?? 1).toFixed(2)}</span>x</div>
+              <div class="settings-title-text">摆动强度：<span id="${MODULE_NAME}_wander_gait_intensity_val">${Number(pluginConfig.wanderGaitIntensity ?? 1).toFixed(2)}</span>x</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_wander_gait_intensity" min="0" max="2" step="0.05" value="${Number.isFinite(Number(pluginConfig.wanderGaitIntensity)) ? Number(pluginConfig.wanderGaitIntensity) : 1}">
               </div>
@@ -3101,8 +3147,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">渚ц韩鏈濆悜</div>
-              <div class="settings-title-description">璧板姩鏃惰妯″瀷鏈濆悜渚ч潰锛堟洿鍍忊€滀晶鐫€璧扳€濓級</div>
+              <div class="settings-title-text">侧身朝向</div>
+              <div class="settings-title-description">走动时让模型朝向侧面</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_wander_face_enabled" class="toggle-input" ${pluginConfig.wanderFaceEnabled ? "checked" : ""} />
@@ -3112,7 +3158,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">渚ц韩瑙掑害锛<span id="${MODULE_NAME}_wander_face_angle_val">${Number.isFinite(Number(pluginConfig.wanderFaceAngleDeg)) ? Math.round(Number(pluginConfig.wanderFaceAngleDeg)) : 45}</span>掳</div>
+              <div class="settings-title-text">侧身角度：<span id="${MODULE_NAME}_wander_face_angle_val">${Number.isFinite(Number(pluginConfig.wanderFaceAngleDeg)) ? Math.round(Number(pluginConfig.wanderFaceAngleDeg)) : 45}</span>°</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_wander_face_angle" min="0" max="90" step="1" value="${Number.isFinite(Number(pluginConfig.wanderFaceAngleDeg)) ? Math.round(Number(pluginConfig.wanderFaceAngleDeg)) : 45}">
               </div>
@@ -3121,8 +3167,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">澶撮儴杩借釜</div>
-              <div class="settings-title-description">澶?棰堜細杞诲井璺熼殢榧犳爣锛堝箙搴﹀緢灏忥紝鍏煎澶ч儴鍒?VRM锛</div>
+              <div class="settings-title-text">头部追踪</div>
+              <div class="settings-title-description">头/颈会轻微跟随鼠标（幅度很小）</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_head_track" class="toggle-input" ${pluginConfig.headTrackEnabled ? "checked" : ""} />
@@ -3132,8 +3178,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">鐪煎姩杩借釜锛堢畝鍖栫増锛</div>
-              <div class="settings-title-description">濡傛灉娌℃湁 VRM LookAt锛屽氨鐢ㄦ洿灏忓箙搴︾殑澶?棰堝姩浣滄潵鈥滃亣瑁呯湅鈥</div>
+              <div class="settings-title-text">眼动追踪（简化版）</div>
+              <div class="settings-title-description">没有 VRM LookAt 时，用更小幅度头/颈动作来“假装看”</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_eye_track" class="toggle-input" ${pluginConfig.eyeTrackEnabled ? "checked" : ""} />
@@ -3143,8 +3189,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">绌洪棽鍔ㄤ綔</div>
-              <div class="settings-title-description">涓€娈垫椂闂存病浜や簰锛堥粯璁?6~12 绉掗殢鏈猴級锛屼細闅忔満鍋氫竴涓皬鍔ㄤ綔</div>
+              <div class="settings-title-text">空闲动作</div>
+              <div class="settings-title-description">一段时间没交互会随机做一个小动作</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_idle_enabled" class="toggle-input" ${pluginConfig.idleEnabled ? "checked" : ""} />
@@ -3154,8 +3200,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">鍋跺皵鐪ㄧ溂</div>
-              <div class="settings-title-description">鏃犲姩浣滄椂涔熶細闅忔満鐪ㄧ溂锛堥渶瑕佹ā鍨嬫敮鎸?blink 琛ㄦ儏锛</div>
+              <div class="settings-title-text">偶尔眨眼</div>
+              <div class="settings-title-description">无动作时也会随机眨眼（需要模型支持 blink 表情）</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_blink_enabled" class="toggle-input" ${pluginConfig.blinkEnabled ? "checked" : ""} />
@@ -3165,8 +3211,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">鎷嶆媿澶</div>
-              <div class="settings-title-description">鐐瑰嚮澶撮儴闄勮繎浼氳Е鍙戔€滄懜澶村弽搴斺€? 鐖卞績绮掑瓙</div>
+              <div class="settings-title-text">拍拍头</div>
+              <div class="settings-title-description">点击头部附近触发“摸头反应”+ 爱心粒子</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_pat_enabled" class="toggle-input" ${pluginConfig.patEnabled ? "checked" : ""} />
@@ -3176,8 +3222,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">鎵嬭噦鑷劧涓嬪瀭</div>
-              <div class="settings-title-description">瑙ｅ喅鏌愪簺妯″瀷鈥滃钩涓?T Pose鈥濈珯濮匡紙涓嶅奖鍝嶈蛋璺憜鍔?鍔ㄤ綔锛</div>
+              <div class="settings-title-text">手臂自然下垂</div>
+              <div class="settings-title-description">解决某些模型“平举/T Pose”站姿</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_relax_arms" class="toggle-input" ${pluginConfig.relaxArmsEnabled ? "checked" : ""} />
@@ -3187,8 +3233,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">璧拌矾鏃朵篃涓嬪帇</div>
-              <div class="settings-title-description">寮€鍚悗锛屸€滄闈㈣蛋鍔?璧拌矾鎽嗗姩鈥濇湡闂翠篃浼氬彔鍔犳墜鑷備笅鍨傦紙鎸変笂闈㈠弬鏁帮級</div>
+              <div class="settings-title-text">走路时也下压</div>
+              <div class="settings-title-description">开启后，走动/走路摆动期间也叠加手臂下垂</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_relax_arms_gait" class="toggle-input" ${pluginConfig.relaxArmsDuringWanderGait ? "checked" : ""} />
@@ -3198,13 +3244,13 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">涓嬪瀭鏂瑰紡</div>
-              <div class="settings-title-description">涓嶅悓妯″瀷楠ㄩ杞村悜涓嶄竴鏍凤紱鎺ㄨ崘鐢ㄢ€滆嚜鍔ㄢ€濓紝涓嶈鍐嶆墜鍔ㄥ垏</div>
+              <div class="settings-title-text">下垂方式</div>
+              <div class="settings-title-description">不同模型骨骼轴向不一样；推荐用“自动”</div>
               <div class="marginTop5">
                 <select id="${MODULE_NAME}_relax_arms_mode" class="text_pole">
-                  <option value="auto" ${String(pluginConfig.relaxArmsMode||"auto")==="auto" ? "selected" : ""}>鑷姩锛堟帹鑽愶級</option>
-                  <option value="zroll" ${String(pluginConfig.relaxArmsMode||"auto")==="zroll" ? "selected" : ""}>Z 杞存粴杞紙鎵嬪姩锛?/option>
-                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode||"auto")==="xpitch" ? "selected" : ""}>X 杞翠笅鍘嬶紙鎵嬪姩锛?/option>
+                  <option value="auto" ${String(pluginConfig.relaxArmsMode||"auto")==="auto" ? "selected" : ""}>自动（推荐）</option>
+                  <option value="zroll" ${String(pluginConfig.relaxArmsMode||"auto")==="zroll" ? "selected" : ""}>Z 轴滚转（手动）</option>
+                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode||"auto")==="xpitch" ? "selected" : ""}>X 轴下压（手动）</option>
                 </select>
               </div>
             </div>
@@ -3212,7 +3258,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">涓嬪瀭骞呭害锛<span id="${MODULE_NAME}_relax_arms_down_val">${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}</span>掳</div>
+              <div class="settings-title-text">下垂幅度：<span id="${MODULE_NAME}_relax_arms_down_val">${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}</span>°</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_down" min="0" max="80" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}">
               </div>
@@ -3221,7 +3267,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">鎵嬭倶寮洸锛<span id="${MODULE_NAME}_relax_arms_bend_val">${Number.isFinite(Number(pluginConfig.relaxArmsElbowBendDeg)) ? Math.round(Number(pluginConfig.relaxArmsElbowBendDeg)) : 16}</span>掳</div>
+              <div class="settings-title-text">手肘弯曲：<span id="${MODULE_NAME}_relax_arms_bend_val">${Number.isFinite(Number(pluginConfig.relaxArmsElbowBendDeg)) ? Math.round(Number(pluginConfig.relaxArmsElbowBendDeg)) : 16}</span>°</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_bend" min="0" max="35" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsElbowBendDeg)) ? Math.round(Number(pluginConfig.relaxArmsElbowBendDeg)) : 16}">
               </div>
@@ -3230,7 +3276,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">鍚戝墠涓€鐐癸細<span id="${MODULE_NAME}_relax_arms_fwd_val">${Number.isFinite(Number(pluginConfig.relaxArmsForwardDeg)) ? Math.round(Number(pluginConfig.relaxArmsForwardDeg)) : 10}</span>掳</div>
+              <div class="settings-title-text">向前一点：<span id="${MODULE_NAME}_relax_arms_fwd_val">${Number.isFinite(Number(pluginConfig.relaxArmsForwardDeg)) ? Math.round(Number(pluginConfig.relaxArmsForwardDeg)) : 10}</span>°</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_fwd" min="-25" max="35" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsForwardDeg)) ? Math.round(Number(pluginConfig.relaxArmsForwardDeg)) : 10}">
               </div>
@@ -3239,7 +3285,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">鍚戝涓€鐐癸細<span id="${MODULE_NAME}_relax_arms_out_val">${Number.isFinite(Number(pluginConfig.relaxArmsOutDeg)) ? Math.round(Number(pluginConfig.relaxArmsOutDeg)) : 8}</span>掳</div>
+              <div class="settings-title-text">向外一点：<span id="${MODULE_NAME}_relax_arms_out_val">${Number.isFinite(Number(pluginConfig.relaxArmsOutDeg)) ? Math.round(Number(pluginConfig.relaxArmsOutDeg)) : 8}</span>°</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_out" min="-25" max="25" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsOutDeg)) ? Math.round(Number(pluginConfig.relaxArmsOutDeg)) : 8}">
               </div>
@@ -3248,8 +3294,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">鎷栨嫿鈥滆鎻愯捣鏉モ€濆姩浣</div>
-              <div class="settings-title-description">鎷栧姩妗屽疇鏃舵墜鑷備細鏈夎鎷庤捣鐨勬憜鍔ㄦ劅</div>
+              <div class="settings-title-text">拖拽“被提起来”动作</div>
+              <div class="settings-title-description">拖动桌宠时手臂有被拎起的摆动感</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_drag_pose" class="toggle-input" ${pluginConfig.dragHeldPoseEnabled ? "checked" : ""} />
@@ -3259,7 +3305,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">鎷栨嫿鍔ㄤ綔寮哄害锛<span id="${MODULE_NAME}_drag_pose_intensity_val">${Number.isFinite(Number(pluginConfig.dragHeldPoseIntensity)) ? Number(pluginConfig.dragHeldPoseIntensity).toFixed(2) : "1.00"}</span>x</div>
+              <div class="settings-title-text">拖拽动作强度：<span id="${MODULE_NAME}_drag_pose_intensity_val">${Number.isFinite(Number(pluginConfig.dragHeldPoseIntensity)) ? Number(pluginConfig.dragHeldPoseIntensity).toFixed(2) : "1.00"}</span>x</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_drag_pose_intensity" min="0" max="2" step="0.05" value="${Number.isFinite(Number(pluginConfig.dragHeldPoseIntensity)) ? Number(pluginConfig.dragHeldPoseIntensity) : 1}">
               </div>
@@ -3691,6 +3737,7 @@ function init() {
 }
 
 $(document).ready(() => init());
+
 
 
 
