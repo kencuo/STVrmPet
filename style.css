@@ -220,8 +220,8 @@
 }
 
 #vrm-pet-overlay .vrm-pet-chat {
-  width: min(96%, 520px);
-  height: min(96%, 560px);
+  width: min(98%, 640px);
+  height: min(98%, 760px);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.96);
   border: 1.5px solid rgba(224, 198, 247, 0.95);
@@ -392,6 +392,31 @@
   line-height: 1.35;
   word-break: break-word;
   white-space: pre-wrap;
+}
+
+#vrm-pet-overlay .vrm-pet-chat-bubble-wrap {
+  position: relative;
+  max-width: 86%;
+}
+
+#vrm-pet-overlay .vrm-pet-chat-del {
+  position: absolute;
+  right: -6px;
+  top: -8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(255, 255, 255, 0.95);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: none;
+}
+
+#vrm-pet-overlay .vrm-pet-chat-msg:hover .vrm-pet-chat-del {
+  display: grid;
+  place-items: center;
 }
 
 #vrm-pet-overlay .vrm-pet-chat-msg.user .vrm-pet-chat-bubble {
