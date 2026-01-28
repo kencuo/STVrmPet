@@ -85,9 +85,10 @@ const DEFAULT_CONFIG = {
     // Relaxed pose: lower arms when idle (some VRMs appear T-posed in this simplified renderer).
     relaxArmsEnabled: true,
     // Different VRMs use different local bone axes; provide a simple mode switch.
+    // - "auto": pick best axis per model (recommended)
     // - "zroll": rotate around local Z (works for many T-pose rigs)
     // - "xpitch": rotate around local X (use if arms go "back" instead of down)
-    relaxArmsMode: "zroll",
+    relaxArmsMode: "auto",
     // How far to lower arms from a typical T-pose (deg).
     relaxArmsDownDeg: 55,
     // Pull arms slightly forward to avoid hands going inside the torso (deg).
@@ -976,8 +977,9 @@ function applyRelaxOrDragPose(delta) {
 
     if (!pluginConfig.relaxArmsEnabled) return;
 
-    const modeRaw = String(pluginConfig.relaxArmsMode || "zroll");
-    const mode = modeRaw === "xpitch" ? "xpitch" : "zroll";
+    const modeRaw = String(pluginConfig.relaxArmsMode || "auto");
+    const mode =
+        modeRaw === "xpitch" ? "xpitch" : modeRaw === "zroll" ? "zroll" : "auto";
 
     const downDegRaw = Number(pluginConfig.relaxArmsDownDeg);
     const downDeg = Number.isFinite(downDegRaw) ? clamp(downDegRaw, 0, 80) : 55;
@@ -993,7 +995,31 @@ function applyRelaxOrDragPose(delta) {
     const out = THREE.MathUtils.degToRad(outDeg);
     const bend = THREE.MathUtils.degToRad(bendDeg);
 
-    if (mode === "zroll") {
+    if (mode === "auto") {
+        const picked = ensureRelaxAxisCache(vrm);
+
+        const applyPicked = (ua, pickedSide, sideZSign) => {
+            if (!ua) return;
+            const p = pickedSide ?? { axis: "z", sign: sideZSign };
+
+            // Base offsets to keep hands visible.
+            let rx = -fwd;
+            let ry = sideZSign > 0 ? +out : -out;
+            let rz = 0;
+
+            const radDown = down * (p.sign || 1);
+            if (p.axis === "x") rx += radDown;
+            else if (p.axis === "y") ry += radDown;
+            else rz += radDown;
+
+            eTmp.set(rx, ry, rz, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            ua.quaternion.multiply(qTmp);
+        };
+
+        applyPicked(lUA, picked?.left, 1);
+        applyPicked(rUA, picked?.right, -1);
+    } else if (mode === "zroll") {
         // Many rigs: lowering arms from T-pose looks reasonable by rolling upper arms around Z.
         if (lUA) {
             // Add a small forward + outward bias so hands stay visible instead of clipping into the chest.
@@ -1393,8 +1419,10 @@ function initPetActionRig(vrm) {
         "head",
         "leftUpperArm",
         "leftLowerArm",
+        "leftHand",
         "rightUpperArm",
         "rightLowerArm",
+        "rightHand",
         "leftUpperLeg",
         "leftLowerLeg",
         "leftFoot",
@@ -1417,6 +1445,91 @@ function initPetActionRig(vrm) {
 
     vrm.scene.userData.__vrmPetBones = bones;
     vrm.scene.userData.__vrmPetBoneRest = rest;
+}
+
+function ensureRelaxAxisCache(vrm) {
+    if (!vrm?.scene?.userData) return null;
+    const cached = vrm.scene.userData.__vrmPetRelaxArmAxis ?? null;
+    if (cached) return cached;
+
+    const bones = vrm.scene.userData.__vrmPetBones ?? null;
+    const rest = vrm.scene.userData.__vrmPetBoneRest ?? null;
+    if (!bones || !rest) return null;
+
+    const cam = vrmRenderState.camera ?? null;
+    const forward = new THREE.Vector3(0, 0, 1);
+    if (cam?.position) forward.copy(cam.position).normalize(); // "toward viewer" in world space
+
+    const testOneSide = (side) => {
+        const ua = side === "left" ? bones.leftUpperArm : bones.rightUpperArm;
+        const hand = side === "left" ? bones.leftHand : bones.rightHand;
+        if (!ua || !hand) return { axis: "z", sign: side === "left" ? 1 : -1 };
+
+        const baseQ =
+            rest[side === "left" ? "leftUpperArm" : "rightUpperArm"]?.quaternion ??
+            null;
+        if (!baseQ) return { axis: "z", sign: side === "left" ? 1 : -1 };
+
+        const basePos = new THREE.Vector3();
+        const tmpPos = new THREE.Vector3();
+        hand.getWorldPosition(basePos);
+
+        const axes = [
+            { axis: "x", sign: 1 },
+            { axis: "x", sign: -1 },
+            { axis: "y", sign: 1 },
+            { axis: "y", sign: -1 },
+            { axis: "z", sign: 1 },
+            { axis: "z", sign: -1 },
+        ];
+
+        let best = null;
+        let bestScore = -Infinity;
+        const qTmp = new THREE.Quaternion();
+        const eTmp = new THREE.Euler();
+
+        for (const a of axes) {
+            // Restore to rest before each probe.
+            ua.quaternion.copy(baseQ);
+            ua.updateMatrixWorld(true);
+
+            const rad = THREE.MathUtils.degToRad(22) * a.sign;
+            if (a.axis === "x") eTmp.set(rad, 0, 0, "XYZ");
+            else if (a.axis === "y") eTmp.set(0, rad, 0, "XYZ");
+            else eTmp.set(0, 0, rad, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            ua.quaternion.multiply(qTmp);
+            ua.updateMatrixWorld(true);
+
+            hand.getWorldPosition(tmpPos);
+            const d = tmpPos.clone().sub(basePos);
+
+            // Prefer down + toward viewer + outward.
+            const dy = -d.y; // down is positive score
+            const df = d.dot(forward); // toward viewer
+            const dx = Math.abs(d.x);
+            const score = dy * 1.8 + df * 1.0 + dx * 0.6;
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = { axis: a.axis, sign: a.sign };
+            }
+        }
+
+        // Restore to rest.
+        ua.quaternion.copy(baseQ);
+        ua.updateMatrixWorld(true);
+
+        return best ?? { axis: "z", sign: side === "left" ? 1 : -1 };
+    };
+
+    const out = {
+        left: testOneSide("left"),
+        right: testOneSide("right"),
+    };
+    vrm.scene.userData.__vrmPetRelaxArmAxis = out;
+    log("Relax arms axis picked", out);
+    return out;
 }
 
 function resetPetRigToRest(vrm) {
@@ -2260,11 +2373,12 @@ function createSettingsInterface() {
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
               <div class="settings-title-text">下垂方式</div>
-              <div class="settings-title-description">如果“下垂”变成手往身后走，试试切到 X 轴下压</div>
+              <div class="settings-title-description">不同模型骨骼轴向不一样；推荐用“自动”，不行再手动切</div>
               <div class="marginTop5">
                 <select id="${MODULE_NAME}_relax_arms_mode" class="text_pole">
-                  <option value="zroll" ${String(pluginConfig.relaxArmsMode||"zroll")==="zroll" ? "selected" : ""}>Z 轴滚转（默认）</option>
-                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode||"zroll")==="xpitch" ? "selected" : ""}>X 轴下压（备用）</option>
+                  <option value="auto" ${String(pluginConfig.relaxArmsMode||"auto")==="auto" ? "selected" : ""}>自动（推荐）</option>
+                  <option value="zroll" ${String(pluginConfig.relaxArmsMode||"auto")==="zroll" ? "selected" : ""}>Z 轴滚转（手动）</option>
+                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode||"auto")==="xpitch" ? "selected" : ""}>X 轴下压（手动）</option>
                 </select>
               </div>
             </div>
