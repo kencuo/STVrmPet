@@ -178,6 +178,20 @@ const vrmRenderState = {
         duration: 0.18,
     },
 
+    // Facial expression + simple overlay effects.
+    expressionFx: {
+        // 'happy' | 'angry' | 'sad' | 'blackface' | 'neutral' | null
+        active: null,
+        // ms timestamps (performance.now)
+        startedAt: 0,
+        until: 0,
+        // 0..1
+        strength: 0,
+        // ms
+        fadeInMs: 140,
+        fadeOutMs: 220,
+    },
+
     // Mouse tracking state (for head/eye follow).
     pointer: {
         bound: false,
@@ -193,6 +207,7 @@ const vrmRenderState = {
         menuOpen: false,
         chatOpen: false,
         editorOpen: false,
+        emoteOpen: false,
         longPressTimer: null,
         longPressTriggered: false,
         longPressStart: null,
@@ -373,7 +388,8 @@ function bindOverlayDrag(overlayEl) {
         if (
             vrmRenderState.ui?.menuOpen ||
             vrmRenderState.ui?.chatOpen ||
-            vrmRenderState.ui?.editorOpen
+            vrmRenderState.ui?.editorOpen ||
+            vrmRenderState.ui?.emoteOpen
         )
             return;
         markInteraction();
@@ -393,7 +409,8 @@ function bindOverlayDrag(overlayEl) {
         if (
             vrmRenderState.ui?.menuOpen ||
             vrmRenderState.ui?.chatOpen ||
-            vrmRenderState.ui?.editorOpen
+            vrmRenderState.ui?.editorOpen ||
+            vrmRenderState.ui?.emoteOpen
         )
             return;
         if (pointerId !== e.pointerId || !start) return;
@@ -649,6 +666,104 @@ function removePetEditorModal() {
     if (vrmRenderState.ui) vrmRenderState.ui.editorOpen = false;
 }
 
+function removePetEmotePanel() {
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    const el = overlayEl?.querySelector?.(".vrm-pet-emote-overlay") ?? null;
+    try {
+        el?.remove?.();
+    } catch (_) {}
+    if (vrmRenderState.ui) vrmRenderState.ui.emoteOpen = false;
+}
+
+function showPetEmotePanel() {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    if (!overlayEl) return;
+
+    removePetEmotePanel();
+    if (vrmRenderState.ui) vrmRenderState.ui.emoteOpen = true;
+
+    const overlay = document.createElement("div");
+    overlay.className = "vrm-pet-emote-overlay";
+    overlay.addEventListener(
+        "pointerdown",
+        (e) => {
+            if (e.target === overlay) {
+                e.preventDefault();
+                e.stopPropagation();
+                removePetEmotePanel();
+            }
+        },
+        { capture: true },
+    );
+
+    const panel = document.createElement("div");
+    panel.className = "vrm-pet-emote-panel";
+    panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+
+    const title = document.createElement("div");
+    title.className = "vrm-pet-emote-title";
+    title.textContent = "表情";
+
+    const btnClose = document.createElement("button");
+    btnClose.type = "button";
+    btnClose.className = "vrm-pet-emote-close";
+    btnClose.textContent = "×";
+    btnClose.title = "关闭";
+    btnClose.addEventListener("click", (e) => {
+        e.preventDefault();
+        removePetEmotePanel();
+    });
+
+    const grid = document.createElement("div");
+    grid.className = "vrm-pet-emote-grid";
+
+    const presets = [
+        { id: "happy", label: "开心", icon: "\u263A" }, // ☺
+        { id: "angry", label: "愤怒", icon: "\uD83D\uDCA2" }, // 💢
+        { id: "sad", label: "难过", icon: "\uD83D\uDCA7" }, // 💧
+        { id: "blackface", label: "黑脸", icon: "\u2026" }, // …
+        { id: "neutral", label: "恢复", icon: "\u21BA" }, // ↺
+    ];
+
+    for (const p of presets) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "vrm-pet-emote-btn";
+        b.dataset.emote = p.id;
+        b.innerHTML = `<span class="vrm-pet-emote-ico">${p.icon}</span><span class="vrm-pet-emote-lbl">${p.label}</span>`;
+        grid.appendChild(b);
+    }
+
+    panel.appendChild(title);
+    panel.appendChild(btnClose);
+    panel.appendChild(grid);
+    overlay.appendChild(panel);
+    overlayEl.appendChild(overlay);
+
+    // Position near the pet (after layout).
+    setTimeout(() => positionPetModalPanelNearOverlay(panel), 0);
+
+    panel.addEventListener("click", (e) => {
+        const t = e.target;
+        if (!(t instanceof HTMLElement)) return;
+        const btn = t.closest?.(".vrm-pet-emote-btn");
+        if (!(btn instanceof HTMLElement)) return;
+        e.preventDefault();
+        const id = String(btn.dataset.emote || "");
+        if (!id) return;
+        if (id === "neutral") {
+            // Clear immediately.
+            const vrm = vrmRenderState.currentVrm;
+            if (vrm) clearPetExpressionPresets(vrm);
+            vrmRenderState.expressionFx.active = null;
+            vrmRenderState.expressionFx.strength = 0;
+            return;
+        }
+        applyPetEmotion(id, { durationMs: 1600 });
+    });
+}
+
 function positionPetModalPanelNearOverlay(panelEl) {
     try {
         const overlayEl = document.getElementById("vrm-pet-overlay");
@@ -694,6 +809,7 @@ function showPetEditorModal(kind) {
     const overlayEl = document.getElementById("vrm-pet-overlay");
     if (!overlayEl) return;
 
+    removePetEmotePanel();
     removePetEditorModal();
     if (vrmRenderState.ui) vrmRenderState.ui.editorOpen = true;
 
@@ -872,6 +988,7 @@ function showPetChatModal() {
     const overlayEl = document.getElementById("vrm-pet-overlay");
     if (!overlayEl) return;
 
+    removePetEmotePanel();
     removePetChatModal();
     if (vrmRenderState.ui) vrmRenderState.ui.chatOpen = true;
 
@@ -905,7 +1022,7 @@ function showPetChatModal() {
     btnClose.type = "button";
     btnClose.className = "vrm-pet-chat-btn";
     btnClose.textContent = "×";
-    btnClose.title = "Close";
+    btnClose.title = "关闭";
     btnClose.addEventListener("click", (e) => {
         e.preventDefault();
         removePetChatModal();
@@ -1056,6 +1173,7 @@ function showPetChatModal() {
             msgs.push({ role: "assistant", text: out, at: Date.now() });
             await savePetChatMessagesForCurrentCharacter(msgs);
             refresh();
+            triggerPetEmotionFromText(out);
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             toastr?.error?.(msg, "VRM Pet");
@@ -1123,6 +1241,7 @@ function showPetRadialMenu(clientX, clientY) {
     const overlayEl = document.getElementById("vrm-pet-overlay");
     if (!overlayEl) return;
 
+    removePetEmotePanel();
     removePetRadialMenu();
     if (vrmRenderState.ui) vrmRenderState.ui.menuOpen = true;
     const margin = 10;
@@ -1166,6 +1285,7 @@ function showPetRadialMenu(clientX, clientY) {
 
     const items = [
         { id: "chat", label: "聊天" },
+        { id: "emote", label: "表情" },
         { id: "persona", label: "人设" },
         { id: "prompt", label: "提示词" },
         { id: "ai", label: "AI 回复（填入输入框）" },
@@ -1210,6 +1330,10 @@ function showPetRadialMenu(clientX, clientY) {
                 showPetChatModal();
                 return;
             }
+            if (action === "emote") {
+                showPetEmotePanel();
+                return;
+            }
             if (action === "ai") {
                 const ctx = getContext();
                 if (!ctx?.generateRaw) throw new Error("generateRaw unavailable");
@@ -1250,6 +1374,7 @@ function showPetRadialMenu(clientX, clientY) {
                 if (!text) throw new Error("Empty reply");
                 insertTextIntoSendTextarea(text);
                 toastr?.success?.("已生成回复并填入输入框", "VRM Pet");
+                triggerPetEmotionFromText(text);
                 return;
             }
         } catch (err) {
@@ -2237,6 +2362,7 @@ function startRenderLoop() {
         updateWanderFacing(delta);
         updateDragLift(delta);
         applyRootPose();
+        updateExpressionFx(delta);
         updateBlink(delta);
         vrmRenderState.renderer.render(
             vrmRenderState.scene,
@@ -2257,6 +2383,146 @@ function easeInOutSine(t) {
 
 function clamp01(t) {
     return Math.max(0, Math.min(1, t));
+}
+
+function setExpressionValueSafe(vrm, name, value) {
+    try {
+        const em = vrm?.expressionManager;
+        if (!em?.setValue) return false;
+        em.setValue(String(name), clamp01(Number(value) || 0));
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+function clearPetExpressionPresets(vrm) {
+    // Keep this list small and safe: only presets we control.
+    const names = [
+        "happy",
+        "angry",
+        "sad",
+        "relaxed",
+        "surprised",
+        // some VRM0 models use different blendshape names
+        "joy",
+        "smile",
+        "sorrow",
+    ];
+    for (const n of names) setExpressionValueSafe(vrm, n, 0);
+}
+
+function applyPetEmotion(emotion, opts = {}) {
+    const e = String(emotion || "").toLowerCase();
+    const now = performance.now();
+
+    vrmRenderState.expressionFx.active = e || null;
+    vrmRenderState.expressionFx.startedAt = now;
+    vrmRenderState.expressionFx.until =
+        now + clamp(Number(opts.durationMs) || 1400, 300, 6000);
+    vrmRenderState.expressionFx.fadeInMs = clamp(
+        Number(opts.fadeInMs) || 140,
+        0,
+        1200,
+    );
+    vrmRenderState.expressionFx.fadeOutMs = clamp(
+        Number(opts.fadeOutMs) || 220,
+        0,
+        1200,
+    );
+    vrmRenderState.expressionFx.strength = 0;
+
+    // Trigger lightweight overlay FX immediately (optional; doesn't depend on VRM expressions).
+    if (e === "happy") {
+        const overlayEl = document.getElementById("vrm-pet-overlay");
+        const r = overlayEl?.getBoundingClientRect?.();
+        if (r) spawnHeartsAtClientPoint(r.left + r.width * 0.55, r.top + r.height * 0.2);
+    } else if (e === "angry") {
+        spawnPetEmojiFx("\uD83D\uDCA2"); // 💢
+    } else if (e === "sad") {
+        spawnPetEmojiFx("\uD83D\uDCA7"); // 💧
+    } else if (e === "blackface") {
+        spawnPetBlackFaceFx();
+    }
+}
+
+function updateExpressionFx(delta) {
+    const vrm = vrmRenderState.currentVrm;
+    const fx = vrmRenderState.expressionFx;
+    if (!vrm || !fx?.active) return;
+
+    const now = performance.now();
+    const fadeIn = Math.max(0, Number(fx.fadeInMs) || 0);
+    const fadeOut = Math.max(0, Number(fx.fadeOutMs) || 0);
+    const tIn = fadeIn <= 0 ? 1 : clamp01((now - (fx.startedAt || now)) / fadeIn);
+    const tOut =
+        fadeOut <= 0
+            ? 0
+            : now >= (fx.until || 0)
+              ? clamp01((now - (fx.until || now)) / fadeOut)
+              : 0;
+    const target = clamp01(tIn * (1 - tOut));
+
+    // Smooth it slightly so it doesn't snap with variable FPS.
+    const k = 14;
+    const a = 1 - Math.exp(-k * Math.max(0, delta));
+    fx.strength += (target - (fx.strength || 0)) * a;
+    const s = clamp01(fx.strength || 0);
+
+    // When finished, fully clear.
+    if (now > (fx.until || 0) + fadeOut + 10) {
+        clearPetExpressionPresets(vrm);
+        fx.active = null;
+        fx.strength = 0;
+        return;
+    }
+
+    // Apply expression presets (best-effort).
+    // Many VRMs don't support all presets; failures are ignored.
+    clearPetExpressionPresets(vrm);
+
+    if (fx.active === "happy") {
+        setExpressionValueSafe(vrm, "happy", s);
+        setExpressionValueSafe(vrm, "joy", s);
+        setExpressionValueSafe(vrm, "smile", s);
+        setExpressionValueSafe(vrm, "relaxed", s * 0.35);
+    } else if (fx.active === "angry") {
+        setExpressionValueSafe(vrm, "angry", s);
+    } else if (fx.active === "sad") {
+        setExpressionValueSafe(vrm, "sad", s);
+        setExpressionValueSafe(vrm, "sorrow", s);
+    } else if (fx.active === "blackface") {
+        // Some models have a "sad/angry" look that works for "blackface"; prefer overlay FX anyway.
+        setExpressionValueSafe(vrm, "angry", s * 0.35);
+        setExpressionValueSafe(vrm, "sad", s * 0.25);
+    }
+}
+
+function detectPetEmotionFromText(text) {
+    const s = String(text ?? "");
+    if (!s.trim()) return null;
+
+    // Blackface / speechless / annoyed.
+    if (/[（(]?\s*黑脸\s*[)）]?/.test(s) || /(无语|呵呵|呵呵哒|服了|沉默|……{2,}|(?:\.\.){3,})/.test(s)) {
+        return "blackface";
+    }
+
+    // Angry.
+    if (/(生气|气死|愤怒|怒|火大|别闹|讨厌|哼|气炸|爆炸|怒了|翻车)/.test(s)) return "angry";
+
+    // Happy.
+    if (/(开心|高兴|好耶|太好啦|喜欢|爱你|可爱|棒|耶|哈哈|笑死|嘻嘻|嘿嘿)/.test(s)) return "happy";
+
+    // Sad.
+    if (/(难过|伤心|呜呜|哭|委屈|QAQ|T_T)/.test(s)) return "sad";
+
+    return null;
+}
+
+function triggerPetEmotionFromText(text) {
+    const emo = detectPetEmotionFromText(text);
+    if (!emo) return;
+    applyPetEmotion(emo, { durationMs: 1600 });
 }
 
 function initPetActionRig(vrm) {
@@ -2677,7 +2943,13 @@ function bindStageInteractions(overlayEl) {
 
     const armLongPress = (e) => {
         if (!vrmRenderState.ui) return;
-        if (vrmRenderState.ui.menuOpen) return;
+        if (
+            vrmRenderState.ui.menuOpen ||
+            vrmRenderState.ui.chatOpen ||
+            vrmRenderState.ui.editorOpen ||
+            vrmRenderState.ui.emoteOpen
+        )
+            return;
         // Only arm long-press for touch pointers.
         if (e.pointerType !== "touch") return;
         clearLongPress();
@@ -2791,6 +3063,16 @@ function bindActionTriggers() {
         if (!vrmRenderState.currentVrm) return;
         markInteraction();
         playRandomPetAction("gen");
+
+        // Also react with an expression based on the newly generated text (best-effort).
+        try {
+            const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+            const last = chat.length ? chat[chat.length - 1] : null;
+            if (last && !last.is_user) {
+                const mes = String(last.mes ?? "").trim();
+                if (mes) triggerPetEmotionFromText(mes);
+            }
+        } catch (_) {}
     });
 }
 
@@ -2806,6 +3088,65 @@ function ensureFxLayer() {
         shell.appendChild(fx);
     }
     return fx;
+}
+
+function spawnPetEmojiFx(emojiText) {
+    try {
+        const fx = ensureFxLayer();
+        if (!fx) return;
+
+        const overlayEl = document.getElementById("vrm-pet-overlay");
+        const rect = overlayEl?.getBoundingClientRect?.();
+        if (!rect) return;
+
+        const el = document.createElement("div");
+        el.className = "vrm-pet-emoji-fx";
+        el.textContent = String(emojiText || "");
+
+        // Start near top area of the pet.
+        const x0 = rect.width * randRange(0.35, 0.7);
+        const y0 = rect.height * randRange(0.08, 0.28);
+        el.style.left = `${clamp(x0, 0, rect.width)}px`;
+        el.style.top = `${clamp(y0, 0, rect.height)}px`;
+
+        el.style.setProperty("--vrmPetDx", `${randRange(-10, 10).toFixed(1)}px`);
+        el.style.setProperty("--vrmPetLift", `${randRange(18, 34).toFixed(1)}px`);
+        el.style.setProperty("--vrmPetDur", `${randRange(650, 950).toFixed(0)}ms`);
+
+        fx.appendChild(el);
+        el.addEventListener(
+            "animationend",
+            () => {
+                try {
+                    el.remove();
+                } catch (_) {}
+            },
+            { once: true },
+        );
+    } catch (_) {}
+}
+
+function spawnPetBlackFaceFx() {
+    try {
+        const fx = ensureFxLayer();
+        if (!fx) return;
+        // Don't stack too many.
+        const existing = fx.querySelector(".vrm-pet-blackface-fx");
+        if (existing) existing.remove();
+
+        const el = document.createElement("div");
+        el.className = "vrm-pet-blackface-fx";
+        fx.appendChild(el);
+        el.addEventListener(
+            "animationend",
+            () => {
+                try {
+                    el.remove();
+                } catch (_) {}
+            },
+            { once: true },
+        );
+    } catch (_) {}
 }
 
 function spawnHeartsAtClientPoint(clientX, clientY) {
@@ -3775,6 +4116,7 @@ function bindCharacterChangeRefresh() {
             removePetRadialMenu();
             removePetChatModal();
             removePetEditorModal();
+            removePetEmotePanel();
             refreshCurrentBindingText();
             loadVrmForCurrentCharacter().catch(() => {});
         });
