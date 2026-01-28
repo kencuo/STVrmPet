@@ -38,6 +38,12 @@ const DEFAULT_CONFIG = {
     wanderFaceEnabled: true,
     // 0 - 90
     wanderFaceAngleDeg: 45,
+    // "Pick up" effect while dragging the overlay window.
+    dragLiftEnabled: true,
+    // Relative lift height = modelHeight * factor.
+    dragLiftHeightFactor: 0.08,
+    // Max tilt (deg) while dragging.
+    dragLiftMaxTiltDeg: 10,
     // persisted per-user overlay position (in viewport px). If null, use bottom-right default.
     overlayPos: null,
     enableLogging: false,
@@ -72,6 +78,15 @@ const vrmRenderState = {
         pausedUntil: 0,
         gaitTime: 0,
         faceYaw: 0,
+    },
+    dragLift: {
+        active: false,
+        lift: 0,
+        targetLift: 0,
+        tiltX: 0,
+        tiltZ: 0,
+        targetTiltX: 0,
+        targetTiltZ: 0,
     },
 };
 
@@ -226,6 +241,11 @@ function bindOverlayDrag(overlayEl) {
                 captured = true;
             } catch (_) {}
             e.preventDefault();
+
+            // Start "pick up" effect once we're actually dragging.
+            if (pluginConfig.dragLiftEnabled) {
+                vrmRenderState.dragLift.active = true;
+            }
         }
 
         const w = overlayEl.offsetWidth;
@@ -240,6 +260,27 @@ function bindOverlayDrag(overlayEl) {
 
         // live-update (but save only on pointerup)
         pluginConfig.overlayPos = { x: Math.round(x), y: Math.round(y) };
+
+        // While dragging, "lift" and tilt the model a bit (like grabbing a desktop pet).
+        if (pluginConfig.dragLiftEnabled && vrmRenderState.dragLift.active) {
+            const mag = clamp(Math.hypot(dx, dy) / 80, 0, 1); // ramp up quickly
+            const sizeY =
+                vrmRenderState.currentVrm?.scene?.userData?.__vrmPetBBoxSizeY ??
+                1.6;
+            const factor = Number(pluginConfig.dragLiftHeightFactor);
+            const liftFactor = Number.isFinite(factor) ? factor : 0.08;
+            vrmRenderState.dragLift.targetLift =
+                Math.max(0, sizeY) * clamp(liftFactor, 0, 0.25) * (0.35 + 0.65 * mag);
+
+            const maxTiltDeg = Number(pluginConfig.dragLiftMaxTiltDeg);
+            const deg = Number.isFinite(maxTiltDeg) ? maxTiltDeg : 10;
+            const maxTilt = THREE.MathUtils.degToRad(clamp(deg, 0, 25));
+            const nx = clamp(dx / Math.max(1, w), -1, 1);
+            const ny = clamp(dy / Math.max(1, h), -1, 1);
+            // Slight roll with horizontal drag, slight pitch with vertical drag.
+            vrmRenderState.dragLift.targetTiltZ = nx * maxTilt;
+            vrmRenderState.dragLift.targetTiltX = -ny * maxTilt * 0.85;
+        }
     });
 
     const stop = async (e) => {
@@ -260,6 +301,12 @@ function bindOverlayDrag(overlayEl) {
             ctx.extensionSettings[MODULE_NAME] = pluginConfig;
             ctx.saveSettingsDebounced();
         } catch (_) {}
+
+        // Release "pick up" effect.
+        vrmRenderState.dragLift.active = false;
+        vrmRenderState.dragLift.targetLift = 0;
+        vrmRenderState.dragLift.targetTiltX = 0;
+        vrmRenderState.dragLift.targetTiltZ = 0;
     };
 
     shell.addEventListener("pointerup", stop);
@@ -445,8 +492,8 @@ function updateWanderFacing(delta) {
     const paused = now < (vrmRenderState.wander.pausedUntil || 0);
     const activelyWandering = !!pluginConfig.wanderEnabled && !paused;
 
-    const base = vrm.scene?.userData?.__vrmPetBaseTransform ?? null;
-    if (!base?.quaternion) return;
+    const rest = vrm.scene?.userData?.__vrmPetRootRest ?? null;
+    if (!rest?.quaternion) return;
 
     const faceEnabled = !!pluginConfig.wanderFaceEnabled;
     const angleDegRaw = Number(pluginConfig.wanderFaceAngleDeg);
@@ -463,12 +510,56 @@ function updateWanderFacing(delta) {
     const k = 10; // larger = snappier
     const a = 1 - Math.exp(-k * Math.max(0, delta));
     vrmRenderState.wander.faceYaw += (targetYaw - vrmRenderState.wander.faceYaw) * a;
+}
 
-    const yawQuat = new THREE.Quaternion().setFromAxisAngle(
+function updateDragLift(delta) {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    if (!pluginConfig.dragLiftEnabled) return;
+
+    const st = vrmRenderState.dragLift;
+    const k = 14; // larger = snappier
+    const a = 1 - Math.exp(-k * Math.max(0, delta));
+    st.lift += (st.targetLift - st.lift) * a;
+    st.tiltX += (st.targetTiltX - st.tiltX) * a;
+    st.tiltZ += (st.targetTiltZ - st.tiltZ) * a;
+
+    // When released and nearly at rest, stop applying tiny residuals.
+    if (!st.active) {
+        if (Math.abs(st.lift) < 1e-4) st.lift = 0;
+        if (Math.abs(st.tiltX) < 1e-4) st.tiltX = 0;
+        if (Math.abs(st.tiltZ) < 1e-4) st.tiltZ = 0;
+    }
+}
+
+function applyRootPose() {
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+
+    const rest = vrm.scene?.userData?.__vrmPetRootRest ?? null;
+    if (!rest?.position || !rest?.quaternion) return;
+
+    // Position: base + drag lift offset.
+    const dragEnabled = !!pluginConfig.dragLiftEnabled;
+    const liftY = dragEnabled ? (vrmRenderState.dragLift.lift || 0) : 0;
+    vrm.scene.position.copy(rest.position);
+    vrm.scene.position.y += liftY;
+
+    // Rotation: base * wander yaw * drag tilt.
+    const qBase = rest.quaternion;
+    const qYaw = new THREE.Quaternion().setFromAxisAngle(
         new THREE.Vector3(0, 1, 0),
-        vrmRenderState.wander.faceYaw,
+        vrmRenderState.wander.faceYaw || 0,
     );
-    vrm.scene.quaternion.copy(base.quaternion).multiply(yawQuat);
+    const qTilt = new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(
+            dragEnabled ? (vrmRenderState.dragLift.tiltX || 0) : 0,
+            0,
+            dragEnabled ? (vrmRenderState.dragLift.tiltZ || 0) : 0,
+            "XYZ",
+        ),
+    );
+
+    vrm.scene.quaternion.copy(qBase).multiply(qYaw).multiply(qTilt);
 }
 
 function replaceVrmMaterialsForCompatibility(root) {
@@ -755,6 +846,8 @@ function startRenderLoop() {
         updateWander(delta);
         updateWanderGait(delta);
         updateWanderFacing(delta);
+        updateDragLift(delta);
+        applyRootPose();
         vrmRenderState.renderer.render(
             vrmRenderState.scene,
             vrmRenderState.camera,
@@ -1038,6 +1131,11 @@ function fitCameraToObject(object3d) {
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
 
+    // Cache model size for other effects (e.g., drag-lift height scaling).
+    try {
+        object3d.userData.__vrmPetBBoxSizeY = size.y;
+    } catch (_) {}
+
     // For a "pet overlay", keep feet visible:
     // center on XZ, but align the bottom of the model to y=0.
     const bottomCenter = new THREE.Vector3(center.x, box.min.y, center.z);
@@ -1074,6 +1172,14 @@ function applyModelScaleAndRefit() {
     vrm.scene.updateMatrixWorld(true);
 
     fitCameraToObject(vrm.scene);
+
+    // Root baseline used for yaw/drag effects (kept stable until next refit).
+    try {
+        vrm.scene.userData.__vrmPetRootRest = {
+            position: vrm.scene.position.clone(),
+            quaternion: vrm.scene.quaternion.clone(),
+        };
+    } catch (_) {}
 }
 
 async function loadVrmFromUrl(url) {
@@ -1483,15 +1589,15 @@ function bindSettingsEvents() {
 
             // If disabled, immediately restore to the baseline (front-facing) pose.
             if (!pluginConfig.wanderFaceEnabled && vrmRenderState.currentVrm) {
-                const base =
-                    vrmRenderState.currentVrm.scene?.userData?.__vrmPetBaseTransform ??
+                const rest =
+                    vrmRenderState.currentVrm.scene?.userData?.__vrmPetRootRest ??
                     null;
-                if (base?.quaternion) {
-                    vrmRenderState.wander.faceYaw = 0;
-                    vrmRenderState.currentVrm.scene.quaternion.copy(
-                        base.quaternion,
-                    );
+                vrmRenderState.wander.faceYaw = 0;
+                if (rest?.quaternion) {
+                    // Ensure we snap back to front-facing immediately.
+                    vrmRenderState.currentVrm.scene.quaternion.copy(rest.quaternion);
                 }
+                applyRootPose();
             }
         }
 
