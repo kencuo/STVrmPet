@@ -173,6 +173,14 @@ const vrmRenderState = {
         smoothY: 0,
         lastMoveAt: 0,
     },
+
+    // Radial menu UI (right-click / long-press on the pet)
+    ui: {
+        menuOpen: false,
+        longPressTimer: null,
+        longPressTriggered: false,
+        longPressStart: null,
+    },
 };
 
 function log(...args) {
@@ -341,6 +349,10 @@ function bindOverlayDrag(overlayEl) {
 
     shell.addEventListener("pointerdown", (e) => {
         if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+        // Don't start drag on right-click (we use it for the radial menu on the model canvas).
+        if (typeof e.button === "number" && e.button === 2) return;
+        // When the radial menu is open, don't allow dragging.
+        if (vrmRenderState.ui?.menuOpen) return;
         markInteraction();
         dragging = false;
         captured = false;
@@ -354,6 +366,8 @@ function bindOverlayDrag(overlayEl) {
     });
 
     shell.addEventListener("pointermove", (e) => {
+        // When the radial menu is open, ignore drag moves (prevents accidental dragging after long-press).
+        if (vrmRenderState.ui?.menuOpen) return;
         if (pointerId !== e.pointerId || !start) return;
         const dx = e.clientX - start.x;
         const dy = e.clientY - start.y;
@@ -438,6 +452,241 @@ function bindOverlayDrag(overlayEl) {
 
     shell.addEventListener("pointerup", stop);
     shell.addEventListener("pointercancel", stop);
+}
+
+function getSendTextarea() {
+    /** @type {HTMLTextAreaElement|null} */
+    const el = document.querySelector("#send_textarea");
+    return el;
+}
+
+function insertTextIntoSendTextarea(text) {
+    const el = getSendTextarea();
+    if (!el) return false;
+    const t = String(text ?? "");
+    if (!t) return false;
+
+    // Insert at cursor if possible, else append.
+    try {
+        const start = typeof el.selectionStart === "number" ? el.selectionStart : el.value.length;
+        const end = typeof el.selectionEnd === "number" ? el.selectionEnd : el.value.length;
+        const before = el.value.slice(0, start);
+        const after = el.value.slice(end);
+        const needsNewline =
+            before.length > 0 && !before.endsWith("\n") && !t.startsWith("\n");
+        el.value = before + (needsNewline ? "\n" : "") + t + after;
+        const caret = (before + (needsNewline ? "\n" : "") + t).length;
+        el.setSelectionRange(caret, caret);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.focus();
+        return true;
+    } catch (_) {
+        el.value = (el.value ? el.value + "\n" : "") + t;
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.focus();
+        return true;
+    }
+}
+
+function getPetPersonaForCurrentCharacter() {
+    const character = getCurrentCharacter();
+    if (!character) return "";
+    const ext = getCharacterExtensionData(character) || {};
+    const p = ext?.petPersona;
+    return typeof p === "string" ? p : "";
+}
+
+async function savePetPersonaForCurrentCharacter(personaText) {
+    const ctx = getContext();
+    const character = getCurrentCharacter();
+    if (!character)
+        throw new Error("No character selected (group chat not supported yet)");
+
+    const existing = getCharacterExtensionData(character) || {};
+    const next = mergeDeep(existing, {
+        petPersona: String(personaText ?? "").trim(),
+        petPersonaUpdatedAt: Date.now(),
+    });
+    await ctx.writeExtensionField(ctx.characterId, MODULE_NAME, next);
+    return next;
+}
+
+function removePetRadialMenu() {
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    const shell = overlayEl?.querySelector?.(".vrm-pet-shell") ?? null;
+    const el = shell?.querySelector?.(".vrm-pet-radial-overlay") ?? null;
+    try {
+        el?.remove?.();
+    } catch (_) {}
+    if (vrmRenderState.ui) vrmRenderState.ui.menuOpen = false;
+}
+
+function showPetRadialMenu(clientX, clientY) {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    const shell = overlayEl?.querySelector?.(".vrm-pet-shell") ?? null;
+    if (!overlayEl || !shell) return;
+
+    removePetRadialMenu();
+    if (vrmRenderState.ui) vrmRenderState.ui.menuOpen = true;
+
+    const rect = shell.getBoundingClientRect();
+    const half = 110; // matches CSS width/height 220
+    const margin = 8;
+    const x0 = clientX - rect.left;
+    const y0 = clientY - rect.top;
+    const x = clamp(x0, half + margin, rect.width - half - margin);
+    const y = clamp(y0, half + margin, rect.height - half - margin);
+
+    const overlay = document.createElement("div");
+    overlay.className = "vrm-pet-radial-overlay";
+    overlay.addEventListener(
+        "pointerdown",
+        (e) => {
+            // click outside closes
+            if (e.target === overlay) {
+                e.preventDefault();
+                e.stopPropagation();
+                removePetRadialMenu();
+            }
+        },
+        { capture: true },
+    );
+    overlay.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        removePetRadialMenu();
+    });
+
+    const menu = document.createElement("div");
+    menu.className = "vrm-pet-radial-menu";
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    menu.addEventListener("pointerdown", (e) => {
+        // keep events from reaching drag handlers
+        e.stopPropagation();
+    });
+
+    const center = document.createElement("button");
+    center.type = "button";
+    center.className = "vrm-pet-radial-center";
+    center.textContent = "×";
+    center.title = "关闭";
+    center.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        removePetRadialMenu();
+    });
+
+    const items = [
+        { id: "persona", icon: "📝", label: "人设" },
+        { id: "ai", icon: "🤖", label: "AI回复" },
+    ];
+
+    const radius = 78;
+    const startDeg = -90;
+    const stepDeg = 360 / Math.max(1, items.length);
+
+    const mkItem = (it, angleDeg) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "vrm-pet-radial-item";
+        btn.dataset.action = it.id;
+        btn.style.setProperty("--angle", `${angleDeg}deg`);
+        btn.style.setProperty("--radius", `${radius}px`);
+
+        const icon = document.createElement("div");
+        icon.className = "vrm-pet-radial-icon";
+        icon.textContent = it.icon;
+        const label = document.createElement("div");
+        label.className = "vrm-pet-radial-label";
+        label.textContent = it.label;
+        btn.appendChild(icon);
+        btn.appendChild(label);
+        return btn;
+    };
+
+    for (let i = 0; i < items.length; i++) {
+        const a = startDeg + i * stepDeg;
+        menu.appendChild(mkItem(items[i], a));
+    }
+    menu.appendChild(center);
+
+    menu.addEventListener("click", async (e) => {
+        const t = e.target;
+        if (!(t instanceof HTMLElement)) return;
+        const btn = t.closest?.(".vrm-pet-radial-item");
+        const action = btn?.dataset?.action ?? "";
+        if (!action) return;
+        e.preventDefault();
+        e.stopPropagation();
+        removePetRadialMenu();
+
+        try {
+            if (action === "persona") {
+                const current = getPetPersonaForCurrentCharacter();
+                const next = prompt("设置/修改桌宠人设（会保存到当前角色扩展字段）", current || "");
+                if (next === null) return;
+                await savePetPersonaForCurrentCharacter(next);
+                insertTextIntoSendTextarea(String(next).trim());
+                toastr?.success?.("已保存并填入输入框", "VRM Pet");
+                return;
+            }
+            if (action === "ai") {
+                const ctx = getContext();
+                if (!ctx?.generateRaw) throw new Error("generateRaw unavailable");
+                const persona = getPetPersonaForCurrentCharacter();
+
+                const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
+                const max = 16;
+                const tail = chat.slice(-max);
+                const nameUser = String(ctx.name1 || "User");
+                const nameChar = String(ctx.name2 || "Assistant");
+
+                const lines = [];
+                for (const m of tail) {
+                    const isUser = !!m?.is_user;
+                    const who = isUser ? nameUser : (m?.name || nameChar);
+                    const mes = String(m?.mes ?? "")
+                        .replace(/\s+/g, " ")
+                        .trim();
+                    if (!mes) continue;
+                    lines.push(`${who}: ${mes}`);
+                }
+
+                const systemPrompt = [
+                    `You are the VRM desktop-pet character in SillyTavern.`,
+                    persona ? `Character persona:\n${persona}` : "",
+                    `Write a single in-character chat reply.`,
+                    `Keep it safe: avoid sexual content, graphic violence, or instructions for wrongdoing.`,
+                    `Output ONLY the reply text (no quotes, no narration).`,
+                ].filter(Boolean).join("\n\n");
+
+                const promptText = [
+                    `Conversation (most recent last):`,
+                    lines.length ? lines.join("\n") : "(no chat context available)",
+                    ``,
+                    `Now write ${nameChar}'s next reply.`,
+                ].join("\n");
+
+                const reply = await ctx.generateRaw({
+                    prompt: promptText,
+                    systemPrompt,
+                });
+
+                const text = String(reply ?? "").trim();
+                if (!text) throw new Error("Empty reply");
+                insertTextIntoSendTextarea(text);
+                toastr?.success?.("已生成回复并填入输入框", "VRM Pet");
+                return;
+            }
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            toastr?.error?.(msg, "VRM Pet");
+        }
+    });
+
+    overlay.appendChild(menu);
+    shell.appendChild(overlay);
 }
 
 function stopRenderLoop() {
@@ -1805,7 +2054,65 @@ function bindStageInteractions(overlayEl) {
     const ndc = new THREE.Vector2();
 
     let down = null;
+    let lpMoveCancelBound = false;
+
+    const clearLongPress = () => {
+        if (vrmRenderState.ui?.longPressTimer) {
+            clearTimeout(vrmRenderState.ui.longPressTimer);
+            vrmRenderState.ui.longPressTimer = null;
+        }
+        if (vrmRenderState.ui) {
+            vrmRenderState.ui.longPressTriggered = false;
+            vrmRenderState.ui.longPressStart = null;
+        }
+    };
+
+    const armLongPress = (e) => {
+        if (!vrmRenderState.ui) return;
+        if (vrmRenderState.ui.menuOpen) return;
+        // Only arm long-press for touch pointers.
+        if (e.pointerType !== "touch") return;
+        clearLongPress();
+        vrmRenderState.ui.longPressTriggered = false;
+        vrmRenderState.ui.longPressStart = { x: e.clientX, y: e.clientY, id: e.pointerId };
+        vrmRenderState.ui.longPressTimer = setTimeout(() => {
+            if (!vrmRenderState.ui) return;
+            vrmRenderState.ui.longPressTriggered = true;
+            // Pause wandering so the pet doesn't run away during menu interaction.
+            vrmRenderState.wander.pausedUntil = performance.now() + 2000;
+            markInteraction();
+            showPetRadialMenu(e.clientX, e.clientY);
+        }, 520);
+
+        // Bind move cancel once (keeps code local to this canvas).
+        if (!lpMoveCancelBound) {
+            lpMoveCancelBound = true;
+            canvas.addEventListener(
+                "pointermove",
+                (ev) => {
+                    const st = vrmRenderState.ui;
+                    if (!st?.longPressStart || st.longPressTriggered) return;
+                    if (st.longPressStart.id !== ev.pointerId) return;
+                    const dx = ev.clientX - st.longPressStart.x;
+                    const dy = ev.clientY - st.longPressStart.y;
+                    if (Math.hypot(dx, dy) > 8) clearLongPress();
+                },
+                { passive: true },
+            );
+        }
+    };
+
+    canvas.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        vrmRenderState.wander.pausedUntil = performance.now() + 2000;
+        markInteraction();
+        showPetRadialMenu(e.clientX, e.clientY);
+    });
+
     canvas.addEventListener("pointerdown", (e) => {
+        // Long-press radial menu (touch).
+        armLongPress(e);
         down = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId };
     });
 
@@ -1815,6 +2122,9 @@ function bindStageInteractions(overlayEl) {
         const dy = e.clientY - down.y;
         const dt = performance.now() - down.t;
         down = null;
+        const lp = vrmRenderState.ui?.longPressTriggered;
+        clearLongPress();
+        if (lp) return; // long-press consumed this interaction
         // treat as "tap" (not drag) if movement small and quick
         if (dt > 600 || Math.hypot(dx, dy) > 6) return;
         if (!vrmRenderState.currentVrm) return;
@@ -1854,6 +2164,11 @@ function bindStageInteractions(overlayEl) {
         }
 
         playRandomPetAction("tap");
+    });
+
+    canvas.addEventListener("pointercancel", () => {
+        down = null;
+        clearLongPress();
     });
 }
 
