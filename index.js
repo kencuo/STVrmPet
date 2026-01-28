@@ -84,6 +84,9 @@ const DEFAULT_CONFIG = {
 
     // Relaxed pose: lower arms when idle (some VRMs appear T-posed in this simplified renderer).
     relaxArmsEnabled: true,
+    // Apply the same "relax arms" offsets during wander gait (walk-in-place).
+    // This keeps the arms lowered while walking, while still allowing the gait swing to animate on top.
+    relaxArmsDuringWanderGait: true,
     // Different VRMs use different local bone axes; provide a simple mode switch.
     // - "auto": pick best axis per model (recommended)
     // - "zroll": rotate around local Z (works for many T-pose rigs)
@@ -921,7 +924,7 @@ function applyRelaxOrDragPose(delta) {
         !!pluginConfig.wanderEnabled &&
         !!pluginConfig.wanderGaitEnabled &&
         now >= (vrmRenderState.wander.pausedUntil || 0);
-    if (gaitActive) return;
+    if (gaitActive && !pluginConfig.relaxArmsDuringWanderGait) return;
 
     const lUA = bones.leftUpperArm;
     const rUA = bones.rightUpperArm;
@@ -2371,6 +2374,17 @@ function createSettingsInterface() {
           </div>
 
           <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">走路时也下压</div>
+              <div class="settings-title-description">开启后，“桌面走动/走路摆动”期间也会叠加手臂下垂（按上面参数）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_relax_arms_gait" class="toggle-input" ${pluginConfig.relaxArmsDuringWanderGait ? "checked" : ""} />
+              <label for="${MODULE_NAME}_relax_arms_gait" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
               <div class="settings-title-text">下垂方式</div>
               <div class="settings-title-description">不同模型骨骼轴向不一样；推荐用“自动”，不行再手动切</div>
@@ -2595,6 +2609,12 @@ function bindSettingsEvents() {
         }
         if (t.id === `${MODULE_NAME}_relax_arms`) {
             pluginConfig.relaxArmsEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
+        }
+        if (t.id === `${MODULE_NAME}_relax_arms_gait`) {
+            pluginConfig.relaxArmsDuringWanderGait = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_relax_arms_mode`) {
