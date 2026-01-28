@@ -66,6 +66,79 @@
   pointer-events: none;
 }
 
+/* Radial menu (right-click / long-press on the pet) */
+#vrm-pet-overlay .vrm-pet-radial-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10020; /* above canvas + FX */
+  background: transparent;
+  touch-action: none;
+}
+
+#vrm-pet-overlay .vrm-pet-radial-menu {
+  position: absolute;
+  width: 220px;
+  height: 220px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1.5px solid rgba(224, 198, 247, 0.95);
+  box-shadow: 0 6px 20px rgba(224, 198, 247, 0.35);
+  backdrop-filter: blur(8px);
+}
+
+#vrm-pet-overlay .vrm-pet-radial-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 72px;
+  height: 72px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  border: 1px solid rgba(224, 198, 247, 0.9);
+  background: linear-gradient(180deg, #ffffff, #f8f1ff);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+  color: #222;
+  font-size: 22px;
+  cursor: pointer;
+}
+
+#vrm-pet-overlay .vrm-pet-radial-item {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 64px;
+  height: 64px;
+  transform-origin: center;
+  transform: translate(-50%, -50%) rotate(var(--angle, 0deg)) translate(var(--radius, 78px))
+    rotate(calc(var(--angle, 0deg) * -1));
+  border-radius: 18px;
+  border: 1px solid rgba(224, 198, 247, 0.75);
+  background: #fff;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  padding: 0;
+}
+
+#vrm-pet-overlay .vrm-pet-radial-item:hover {
+  filter: brightness(0.98);
+}
+
+#vrm-pet-overlay .vrm-pet-radial-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+#vrm-pet-overlay .vrm-pet-radial-label {
+  font-size: 11px;
+  line-height: 1;
+  color: #444;
+  font-weight: 600;
+}
+
 /* FX layer (DOM particles) */
 #vrm-pet-overlay .vrm-pet-fx {
   position: absolute;
