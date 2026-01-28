@@ -221,8 +221,8 @@
 }
 
 #vrm-pet-overlay .vrm-pet-chat {
-  width: min(92vw, 900px);
-  height: min(92vh, 900px);
+  width: min(84vw, 780px);
+  height: min(84vh, 780px);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.96);
   border: 1.5px solid rgba(224, 198, 247, 0.95);
@@ -244,8 +244,8 @@
 }
 
 #vrm-pet-overlay .vrm-pet-editor {
-  width: min(92vw, 900px);
-  height: min(92vh, 900px);
+  width: min(84vw, 780px);
+  height: min(84vh, 780px);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.96);
   border: 1.5px solid rgba(224, 198, 247, 0.95);
