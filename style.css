@@ -209,9 +209,10 @@
 
 /* Pet chat modal (separate from main SillyTavern chat input) */
 #vrm-pet-overlay .vrm-pet-chat-overlay {
-  position: absolute;
+  /* Use viewport-sized modal; the pet overlay itself is only ~240px. */
+  position: fixed;
   inset: 0;
-  z-index: 10030; /* above radial menu */
+  z-index: 10030;
   background: rgba(0, 0, 0, 0.25);
   backdrop-filter: blur(3px);
   touch-action: none;
@@ -220,8 +221,8 @@
 }
 
 #vrm-pet-overlay .vrm-pet-chat {
-  width: min(98%, 640px);
-  height: min(98%, 760px);
+  width: min(92vw, 900px);
+  height: min(92vh, 900px);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.96);
   border: 1.5px solid rgba(224, 198, 247, 0.95);
@@ -232,9 +233,9 @@
 }
 
 #vrm-pet-overlay .vrm-pet-editor-overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  z-index: 10040; /* above chat */
+  z-index: 10040;
   background: rgba(0, 0, 0, 0.25);
   backdrop-filter: blur(3px);
   touch-action: none;
@@ -243,8 +244,8 @@
 }
 
 #vrm-pet-overlay .vrm-pet-editor {
-  width: min(96%, 560px);
-  height: min(96%, 560px);
+  width: min(92vw, 900px);
+  height: min(92vh, 900px);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.96);
   border: 1.5px solid rgba(224, 198, 247, 0.95);
