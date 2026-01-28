@@ -30,6 +30,14 @@ const DEFAULT_CONFIG = {
     wanderEnabled: false,
     // Pixels per second.
     wanderSpeed: 80,
+    // Add a simple "walk in place" gait while the window is wandering.
+    wanderGaitEnabled: true,
+    // 0.0 - 2.0
+    wanderGaitIntensity: 1.0,
+    // Turn the model to a side-view while wandering (e.g. 45deg).
+    wanderFaceEnabled: true,
+    // 0 - 90
+    wanderFaceAngleDeg: 45,
     // persisted per-user overlay position (in viewport px). If null, use bottom-right default.
     overlayPos: null,
     enableLogging: false,
@@ -62,6 +70,8 @@ const vrmRenderState = {
         vx: 1,
         vy: 0,
         pausedUntil: 0,
+        gaitTime: 0,
+        faceYaw: 0,
     },
 };
 
@@ -325,6 +335,140 @@ function updateWander(delta) {
     overlayEl.style.bottom = "auto";
 
     pluginConfig.overlayPos = { x: Math.round(x), y: Math.round(y) };
+}
+
+function updateWanderGait(delta) {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    if (!pluginConfig.wanderEnabled || !pluginConfig.wanderGaitEnabled) return;
+    if (vrmRenderState.petAction.active) return; // don't fight explicit actions
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+
+    const now = performance.now();
+    if (now < (vrmRenderState.wander.pausedUntil || 0)) return;
+
+    const bones = vrm.scene.userData.__vrmPetBones ?? null;
+    const rest = vrm.scene.userData.__vrmPetBoneRest ?? null;
+    if (!bones || !rest) return;
+
+    const intensityRaw = Number(pluginConfig.wanderGaitIntensity);
+    const intensity = Number.isFinite(intensityRaw) ? Math.max(0, Math.min(2, intensityRaw)) : 1.0;
+    if (intensity <= 0) return;
+
+    // Advance gait phase. Faster wander -> slightly faster gait.
+    const speed = Math.max(10, Number(pluginConfig.wanderSpeed) || 80);
+    const freq = 2.2 + (speed / 200) * 1.2; // ~2.2 - 3.4 Hz
+    vrmRenderState.wander.gaitTime += delta * freq;
+    const phase = vrmRenderState.wander.gaitTime;
+
+    // Reset to rest pose before applying gait offsets.
+    resetPetRigToRest(vrm);
+
+    const s = Math.sin(phase * Math.PI * 2);
+    const c = Math.cos(phase * Math.PI * 2);
+    const dir = (vrmRenderState.wander.vx || 1) >= 0 ? 1 : -1; // mirror when moving left
+
+    const qTmp = new THREE.Quaternion();
+    const eTmp = new THREE.Euler();
+
+    const hips = bones.hips;
+    const spine = bones.spine;
+    const chest = bones.chest ?? bones.upperChest;
+    const head = bones.head;
+    const rUA = bones.rightUpperArm;
+    const lUA = bones.leftUpperArm;
+    const rLA = bones.rightLowerArm;
+    const lLA = bones.leftLowerArm;
+
+    // Subtle vertical bob.
+    if (hips && rest.hips) {
+        const amp = 0.02 * intensity;
+        hips.position.y = rest.hips.position.y + amp * Math.abs(s);
+    }
+
+    // Tiny torso sway.
+    if (spine) {
+        const sway = THREE.MathUtils.degToRad(3.5) * intensity;
+        eTmp.set(0, 0, dir * sway * s, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        spine.quaternion.multiply(qTmp);
+    }
+    if (chest) {
+        const sway = THREE.MathUtils.degToRad(2.0) * intensity;
+        eTmp.set(0, 0, -dir * sway * s, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        chest.quaternion.multiply(qTmp);
+    }
+
+    // Head bob.
+    if (head) {
+        const nod = THREE.MathUtils.degToRad(4.5) * intensity;
+        eTmp.set(-nod * Math.abs(s) * 0.6, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        head.quaternion.multiply(qTmp);
+    }
+
+    // Arm swing (walk in place).
+    const armSwing = THREE.MathUtils.degToRad(22) * intensity;
+    const armOut = THREE.MathUtils.degToRad(6) * intensity;
+    if (lUA) {
+        eTmp.set(armSwing * s * 0.75, 0, -dir * armOut * c, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        lUA.quaternion.multiply(qTmp);
+    }
+    if (rUA) {
+        eTmp.set(-armSwing * s * 0.75, 0, dir * armOut * c, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        rUA.quaternion.multiply(qTmp);
+    }
+
+    // Slight elbow bend.
+    const elbow = THREE.MathUtils.degToRad(18) * intensity;
+    if (lLA) {
+        eTmp.set(-elbow * (0.35 + 0.65 * Math.abs(s)), 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        lLA.quaternion.multiply(qTmp);
+    }
+    if (rLA) {
+        eTmp.set(-elbow * (0.35 + 0.65 * Math.abs(s)), 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        rLA.quaternion.multiply(qTmp);
+    }
+}
+
+function updateWanderFacing(delta) {
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+
+    const now = performance.now();
+    const paused = now < (vrmRenderState.wander.pausedUntil || 0);
+    const activelyWandering = !!pluginConfig.wanderEnabled && !paused;
+
+    const base = vrm.scene?.userData?.__vrmPetBaseTransform ?? null;
+    if (!base?.quaternion) return;
+
+    const faceEnabled = !!pluginConfig.wanderFaceEnabled;
+    const angleDegRaw = Number(pluginConfig.wanderFaceAngleDeg);
+    const angleDeg = Number.isFinite(angleDegRaw)
+        ? Math.max(0, Math.min(90, angleDegRaw))
+        : 45;
+
+    // When wandering: face 45deg in movement direction. Otherwise: face front (0deg).
+    const targetYaw = faceEnabled && activelyWandering
+        ? THREE.MathUtils.degToRad(angleDeg) * ((vrmRenderState.wander.vx || 1) >= 0 ? 1 : -1)
+        : 0;
+
+    // Smoothly approach the target yaw.
+    const k = 10; // larger = snappier
+    const a = 1 - Math.exp(-k * Math.max(0, delta));
+    vrmRenderState.wander.faceYaw += (targetYaw - vrmRenderState.wander.faceYaw) * a;
+
+    const yawQuat = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0),
+        vrmRenderState.wander.faceYaw,
+    );
+    vrm.scene.quaternion.copy(base.quaternion).multiply(yawQuat);
 }
 
 function replaceVrmMaterialsForCompatibility(root) {
@@ -609,6 +753,8 @@ function startRenderLoop() {
         }
         updatePetAction(delta);
         updateWander(delta);
+        updateWanderGait(delta);
+        updateWanderFacing(delta);
         vrmRenderState.renderer.render(
             vrmRenderState.scene,
             vrmRenderState.camera,
@@ -1191,6 +1337,46 @@ function createSettingsInterface() {
             </div>
           </div>
 
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">走路摆动</div>
+              <div class="settings-title-description">走动时做“原地走路”的摆臂/点头（不需要外部动作文件）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_wander_gait_enabled" class="toggle-input" ${pluginConfig.wanderGaitEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_wander_gait_enabled" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">摆动强度：<span id="${MODULE_NAME}_wander_gait_intensity_val">${Number(pluginConfig.wanderGaitIntensity ?? 1).toFixed(2)}</span>x</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_wander_gait_intensity" min="0" max="2" step="0.05" value="${Number.isFinite(Number(pluginConfig.wanderGaitIntensity)) ? Number(pluginConfig.wanderGaitIntensity) : 1}">
+              </div>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">侧身朝向</div>
+              <div class="settings-title-description">走动时让模型朝向侧面（更像“侧着走”）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_wander_face_enabled" class="toggle-input" ${pluginConfig.wanderFaceEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_wander_face_enabled" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">侧身角度：<span id="${MODULE_NAME}_wander_face_angle_val">${Number.isFinite(Number(pluginConfig.wanderFaceAngleDeg)) ? Math.round(Number(pluginConfig.wanderFaceAngleDeg)) : 45}</span>°</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_wander_face_angle" min="0" max="90" step="1" value="${Number.isFinite(Number(pluginConfig.wanderFaceAngleDeg)) ? Math.round(Number(pluginConfig.wanderFaceAngleDeg)) : 45}">
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -1287,6 +1473,27 @@ function bindSettingsEvents() {
             vrmRenderState.wander.pausedUntil = performance.now() + 200;
             saveSettings();
         }
+        if (t.id === `${MODULE_NAME}_wander_gait_enabled`) {
+            pluginConfig.wanderGaitEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
+        }
+        if (t.id === `${MODULE_NAME}_wander_face_enabled`) {
+            pluginConfig.wanderFaceEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
+
+            // If disabled, immediately restore to the baseline (front-facing) pose.
+            if (!pluginConfig.wanderFaceEnabled && vrmRenderState.currentVrm) {
+                const base =
+                    vrmRenderState.currentVrm.scene?.userData?.__vrmPetBaseTransform ??
+                    null;
+                if (base?.quaternion) {
+                    vrmRenderState.wander.faceYaw = 0;
+                    vrmRenderState.currentVrm.scene.quaternion.copy(
+                        base.quaternion,
+                    );
+                }
+            }
+        }
 
         // Auto-upload after file picked (button click opens the picker).
         if (t.id === `${MODULE_NAME}_file`) {
@@ -1362,6 +1569,23 @@ function bindSettingsEvents() {
             pluginConfig.wanderSpeed = Number.isFinite(v) ? v : DEFAULT_CONFIG.wanderSpeed;
             const out = document.getElementById(`${MODULE_NAME}_wander_speed_val`);
             if (out) out.textContent = String(pluginConfig.wanderSpeed);
+            saveSettings();
+        }
+
+        if (t.id === `${MODULE_NAME}_wander_gait_intensity`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            pluginConfig.wanderGaitIntensity = Number.isFinite(v) ? v : DEFAULT_CONFIG.wanderGaitIntensity;
+            const out = document.getElementById(`${MODULE_NAME}_wander_gait_intensity_val`);
+            if (out) out.textContent = Number(pluginConfig.wanderGaitIntensity ?? 1).toFixed(2);
+            saveSettings();
+        }
+
+        if (t.id === `${MODULE_NAME}_wander_face_angle`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            const deg = Number.isFinite(v) ? Math.max(0, Math.min(90, v)) : 45;
+            pluginConfig.wanderFaceAngleDeg = deg;
+            const out = document.getElementById(`${MODULE_NAME}_wander_face_angle_val`);
+            if (out) out.textContent = String(Math.round(deg));
             saveSettings();
         }
     });
