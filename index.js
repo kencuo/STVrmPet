@@ -84,6 +84,10 @@ const DEFAULT_CONFIG = {
 
     // Relaxed pose: lower arms when idle (some VRMs appear T-posed in this simplified renderer).
     relaxArmsEnabled: true,
+    // Different VRMs use different local bone axes; provide a simple mode switch.
+    // - "zroll": rotate around local Z (works for many T-pose rigs)
+    // - "xpitch": rotate around local X (use if arms go "back" instead of down)
+    relaxArmsMode: "zroll",
     // How far to lower arms from a typical T-pose (deg).
     relaxArmsDownDeg: 55,
     // Pull arms slightly forward to avoid hands going inside the torso (deg).
@@ -972,6 +976,9 @@ function applyRelaxOrDragPose(delta) {
 
     if (!pluginConfig.relaxArmsEnabled) return;
 
+    const modeRaw = String(pluginConfig.relaxArmsMode || "zroll");
+    const mode = modeRaw === "xpitch" ? "xpitch" : "zroll";
+
     const downDegRaw = Number(pluginConfig.relaxArmsDownDeg);
     const downDeg = Number.isFinite(downDegRaw) ? clamp(downDegRaw, 0, 80) : 55;
     const fwdDegRaw = Number(pluginConfig.relaxArmsForwardDeg);
@@ -986,17 +993,31 @@ function applyRelaxOrDragPose(delta) {
     const out = THREE.MathUtils.degToRad(outDeg);
     const bend = THREE.MathUtils.degToRad(bendDeg);
 
-    // Most VRM rigs: lowering arms from T-pose looks reasonable by rolling upper arms around Z.
-    if (lUA) {
-        // Add a small forward + outward bias so hands stay visible instead of clipping into the chest.
-        eTmp.set(-fwd, +out, +down, "XYZ");
-        qTmp.setFromEuler(eTmp);
-        lUA.quaternion.multiply(qTmp);
-    }
-    if (rUA) {
-        eTmp.set(-fwd, -out, -down, "XYZ");
-        qTmp.setFromEuler(eTmp);
-        rUA.quaternion.multiply(qTmp);
+    if (mode === "zroll") {
+        // Many rigs: lowering arms from T-pose looks reasonable by rolling upper arms around Z.
+        if (lUA) {
+            // Add a small forward + outward bias so hands stay visible instead of clipping into the chest.
+            eTmp.set(-fwd, +out, +down, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lUA.quaternion.multiply(qTmp);
+        }
+        if (rUA) {
+            eTmp.set(-fwd, -out, -down, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rUA.quaternion.multiply(qTmp);
+        }
+    } else {
+        // Some rigs: Z-roll sends arms "behind" instead of down; try X-pitch as a simpler alternative.
+        if (lUA) {
+            eTmp.set(+down, +fwd * 0.35, +out * 0.85, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lUA.quaternion.multiply(qTmp);
+        }
+        if (rUA) {
+            eTmp.set(+down, -fwd * 0.35, -out * 0.85, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rUA.quaternion.multiply(qTmp);
+        }
     }
     if (lLA) {
         eTmp.set(-bend, 0, 0, "XYZ");
@@ -2238,6 +2259,19 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">下垂方式</div>
+              <div class="settings-title-description">如果“下垂”变成手往身后走，试试切到 X 轴下压</div>
+              <div class="marginTop5">
+                <select id="${MODULE_NAME}_relax_arms_mode" class="text_pole">
+                  <option value="zroll" ${String(pluginConfig.relaxArmsMode||"zroll")==="zroll" ? "selected" : ""}>Z 轴滚转（默认）</option>
+                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode||"zroll")==="xpitch" ? "selected" : ""}>X 轴下压（备用）</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
               <div class="settings-title-text">下垂幅度：<span id="${MODULE_NAME}_relax_arms_down_val">${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}</span>°</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_down" min="0" max="80" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}">
@@ -2447,6 +2481,12 @@ function bindSettingsEvents() {
         }
         if (t.id === `${MODULE_NAME}_relax_arms`) {
             pluginConfig.relaxArmsEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
+        }
+        if (t.id === `${MODULE_NAME}_relax_arms_mode`) {
+            pluginConfig.relaxArmsMode = String(
+                /** @type {HTMLSelectElement} */ (t).value || "zroll",
+            );
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_drag_pose`) {
