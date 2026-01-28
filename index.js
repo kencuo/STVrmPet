@@ -82,6 +82,18 @@ const DEFAULT_CONFIG = {
     // Head hit radius ~= modelHeight * factor (tuned for typical VRM proportions).
     patHeadRadiusFactor: 0.22,
 
+    // Relaxed pose: lower arms when idle (some VRMs appear T-posed in this simplified renderer).
+    relaxArmsEnabled: true,
+    // How far to lower arms from a typical T-pose (deg).
+    relaxArmsDownDeg: 55,
+    // Slight elbow bend (deg).
+    relaxArmsElbowBendDeg: 16,
+
+    // While dragging, add a "being picked up" pose on top of root lift/tilt.
+    dragHeldPoseEnabled: true,
+    // 0.0 - 2.0
+    dragHeldPoseIntensity: 1.0,
+
     enableLogging: false,
 };
 
@@ -123,6 +135,7 @@ const vrmRenderState = {
         tiltZ: 0,
         targetTiltX: 0,
         targetTiltZ: 0,
+        time: 0,
     },
 
     // "Idle scheduler" + "blink scheduler" + interaction state.
@@ -346,6 +359,7 @@ function bindOverlayDrag(overlayEl) {
             // Start "pick up" effect once we're actually dragging.
             if (pluginConfig.dragLiftEnabled) {
                 vrmRenderState.dragLift.active = true;
+                vrmRenderState.dragLift.time = 0;
             }
         }
 
@@ -458,17 +472,6 @@ function applyLookTracking(delta) {
     if (!bones || !rest) return;
 
     const now = performance.now();
-
-    // Prevent drift: if nothing else reset the rig this frame (no action, no gait),
-    // our quaternion.multiply() would accumulate forever.
-    const gaitActive =
-        !!pluginConfig.wanderEnabled &&
-        !!pluginConfig.wanderGaitEnabled &&
-        now >= (vrmRenderState.wander.pausedUntil || 0);
-    if (!vrmRenderState.petAction.active && !gaitActive) {
-        resetPetRigToRest(vrm);
-    }
-
     const recentlyMoved = now - (vrmRenderState.pointer.lastMoveAt || 0) < 1800;
 
     const targetX = recentlyMoved ? clamp(vrmRenderState.pointer.ndcX || 0, -1, 1) : 0;
@@ -862,12 +865,137 @@ function updateDragLift(delta) {
     st.lift += (st.targetLift - st.lift) * a;
     st.tiltX += (st.targetTiltX - st.tiltX) * a;
     st.tiltZ += (st.targetTiltZ - st.tiltZ) * a;
+    st.time += Math.max(0, delta);
 
     // When released and nearly at rest, stop applying tiny residuals.
     if (!st.active) {
         if (Math.abs(st.lift) < 1e-4) st.lift = 0;
         if (Math.abs(st.tiltX) < 1e-4) st.tiltX = 0;
         if (Math.abs(st.tiltZ) < 1e-4) st.tiltZ = 0;
+    }
+}
+
+function ensureBaseRigPose() {
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+
+    if (!vrm.scene.userData.__vrmPetBones) initPetActionRig(vrm);
+    const bones = vrm.scene.userData.__vrmPetBones ?? null;
+    const rest = vrm.scene.userData.__vrmPetBoneRest ?? null;
+    if (!bones || !rest) return;
+
+    // If no explicit action and no wander gait, keep a stable base pose (prevents drift).
+    const now = performance.now();
+    const gaitActive =
+        !!pluginConfig.wanderEnabled &&
+        !!pluginConfig.wanderGaitEnabled &&
+        now >= (vrmRenderState.wander.pausedUntil || 0);
+    if (!vrmRenderState.petAction.active && !gaitActive) {
+        resetPetRigToRest(vrm);
+    }
+}
+
+function applyRelaxOrDragPose(delta) {
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    if (vrmRenderState.petAction.active) return; // don't fight actions
+
+    if (!vrm.scene.userData.__vrmPetBones) initPetActionRig(vrm);
+    const bones = vrm.scene.userData.__vrmPetBones ?? null;
+    const rest = vrm.scene.userData.__vrmPetBoneRest ?? null;
+    if (!bones || !rest) return;
+
+    const now = performance.now();
+    const gaitActive =
+        !!pluginConfig.wanderEnabled &&
+        !!pluginConfig.wanderGaitEnabled &&
+        now >= (vrmRenderState.wander.pausedUntil || 0);
+    if (gaitActive) return;
+
+    const lUA = bones.leftUpperArm;
+    const rUA = bones.rightUpperArm;
+    const lLA = bones.leftLowerArm;
+    const rLA = bones.rightLowerArm;
+    if (!lUA && !rUA) return;
+
+    const qTmp = new THREE.Quaternion();
+    const eTmp = new THREE.Euler();
+
+    // Drag pose has priority.
+    if (pluginConfig.dragHeldPoseEnabled && vrmRenderState.dragLift.active) {
+        const v = Number(pluginConfig.dragHeldPoseIntensity);
+        const intensity = Number.isFinite(v) ? clamp(v, 0, 2) : 1.0;
+        if (intensity <= 0) return;
+
+        // Map lift (0..?) to 0..1 strength.
+        const sizeY = vrm.scene.userData.__vrmPetBBoxSizeY ?? 1.6;
+        const liftNorm = clamp((vrmRenderState.dragLift.lift || 0) / Math.max(0.25, sizeY * 0.12), 0, 1);
+
+        // A little sway while held.
+        const t = vrmRenderState.dragLift.time || 0;
+        const sway = Math.sin(t * 6.0) * 0.5 + Math.sin(t * 3.2) * 0.5;
+
+        const raise = THREE.MathUtils.degToRad(28) * intensity * (0.35 + 0.65 * liftNorm);
+        const out = THREE.MathUtils.degToRad(10) * intensity;
+        const roll = THREE.MathUtils.degToRad(14) * intensity;
+        const bend = THREE.MathUtils.degToRad(22) * intensity;
+
+        if (lUA) {
+            eTmp.set(-raise * 0.75, 0, +roll * 0.6 + out * 0.6 + roll * 0.25 * sway, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lUA.quaternion.multiply(qTmp);
+        }
+        if (rUA) {
+            eTmp.set(-raise * 0.75, 0, -roll * 0.6 - out * 0.6 - roll * 0.25 * sway, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rUA.quaternion.multiply(qTmp);
+        }
+        if (lLA) {
+            eTmp.set(-bend * (0.35 + 0.65 * liftNorm), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lLA.quaternion.multiply(qTmp);
+        }
+        if (rLA) {
+            eTmp.set(-bend * (0.35 + 0.65 * liftNorm), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rLA.quaternion.multiply(qTmp);
+        }
+
+        return;
+    }
+
+    if (!pluginConfig.relaxArmsEnabled) return;
+
+    const downDegRaw = Number(pluginConfig.relaxArmsDownDeg);
+    const downDeg = Number.isFinite(downDegRaw) ? clamp(downDegRaw, 0, 80) : 55;
+    const bendDegRaw = Number(pluginConfig.relaxArmsElbowBendDeg);
+    const bendDeg = Number.isFinite(bendDegRaw) ? clamp(bendDegRaw, 0, 35) : 16;
+
+    const down = THREE.MathUtils.degToRad(downDeg);
+    const bend = THREE.MathUtils.degToRad(bendDeg);
+
+    // Most VRM rigs: lowering arms from T-pose looks reasonable by rolling upper arms around Z.
+    if (lUA) {
+        eTmp.set(0, 0, +down, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        lUA.quaternion.multiply(qTmp);
+    }
+    if (rUA) {
+        eTmp.set(0, 0, -down, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        rUA.quaternion.multiply(qTmp);
+    }
+    if (lLA) {
+        eTmp.set(-bend, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        lLA.quaternion.multiply(qTmp);
+    }
+    if (rLA) {
+        eTmp.set(-bend, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        rLA.quaternion.multiply(qTmp);
     }
 }
 
@@ -1181,10 +1309,12 @@ function startRenderLoop() {
                 vrmRenderState.currentVrm.update(delta);
             } catch (_) {}
         }
+        ensureBaseRigPose();
         updatePetAction(delta);
         updateIdleScheduler();
         updateWander(delta);
         updateWanderGait(delta);
+        applyRelaxOrDragPose(delta);
         applyLookTracking(delta);
         updateWanderFacing(delta);
         updateDragLift(delta);
@@ -2084,6 +2214,55 @@ function createSettingsInterface() {
             </div>
           </div>
 
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">手臂自然下垂</div>
+              <div class="settings-title-description">解决某些模型“平举/T Pose”站姿（不影响走路摆动/动作）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_relax_arms" class="toggle-input" ${pluginConfig.relaxArmsEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_relax_arms" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">下垂幅度：<span id="${MODULE_NAME}_relax_arms_down_val">${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}</span>°</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_relax_arms_down" min="0" max="80" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}">
+              </div>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">手肘弯曲：<span id="${MODULE_NAME}_relax_arms_bend_val">${Number.isFinite(Number(pluginConfig.relaxArmsElbowBendDeg)) ? Math.round(Number(pluginConfig.relaxArmsElbowBendDeg)) : 16}</span>°</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_relax_arms_bend" min="0" max="35" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsElbowBendDeg)) ? Math.round(Number(pluginConfig.relaxArmsElbowBendDeg)) : 16}">
+              </div>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">拖拽“被提起来”动作</div>
+              <div class="settings-title-description">拖动桌宠时手臂会有被拎起的摆动感</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_drag_pose" class="toggle-input" ${pluginConfig.dragHeldPoseEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_drag_pose" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">拖拽动作强度：<span id="${MODULE_NAME}_drag_pose_intensity_val">${Number.isFinite(Number(pluginConfig.dragHeldPoseIntensity)) ? Number(pluginConfig.dragHeldPoseIntensity).toFixed(2) : "1.00"}</span>x</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_drag_pose_intensity" min="0" max="2" step="0.05" value="${Number.isFinite(Number(pluginConfig.dragHeldPoseIntensity)) ? Number(pluginConfig.dragHeldPoseIntensity) : 1}">
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -2237,6 +2416,14 @@ function bindSettingsEvents() {
             pluginConfig.patEnabled = /** @type {HTMLInputElement} */ (t).checked;
             saveSettings();
         }
+        if (t.id === `${MODULE_NAME}_relax_arms`) {
+            pluginConfig.relaxArmsEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
+        }
+        if (t.id === `${MODULE_NAME}_drag_pose`) {
+            pluginConfig.dragHeldPoseEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
+        }
 
         // Auto-upload after file picked (button click opens the picker).
         if (t.id === `${MODULE_NAME}_file`) {
@@ -2344,6 +2531,33 @@ function bindSettingsEvents() {
             saveSettings();
             // Camera fit uses diagonal XZ now; this is mostly optional, but refit helps immediately.
             applyModelScaleAndRefit();
+        }
+
+        if (t.id === `${MODULE_NAME}_relax_arms_down`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            const deg = Number.isFinite(v) ? clamp(v, 0, 80) : 55;
+            pluginConfig.relaxArmsDownDeg = deg;
+            const out = document.getElementById(`${MODULE_NAME}_relax_arms_down_val`);
+            if (out) out.textContent = String(Math.round(deg));
+            saveSettings();
+        }
+
+        if (t.id === `${MODULE_NAME}_relax_arms_bend`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            const deg = Number.isFinite(v) ? clamp(v, 0, 35) : 16;
+            pluginConfig.relaxArmsElbowBendDeg = deg;
+            const out = document.getElementById(`${MODULE_NAME}_relax_arms_bend_val`);
+            if (out) out.textContent = String(Math.round(deg));
+            saveSettings();
+        }
+
+        if (t.id === `${MODULE_NAME}_drag_pose_intensity`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            pluginConfig.dragHeldPoseIntensity = Number.isFinite(v) ? clamp(v, 0, 2) : 1.0;
+            const out = document.getElementById(`${MODULE_NAME}_drag_pose_intensity_val`);
+            if (out)
+                out.textContent = Number(pluginConfig.dragHeldPoseIntensity ?? 1).toFixed(2);
+            saveSettings();
         }
     });
 
