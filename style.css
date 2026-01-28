@@ -65,3 +65,54 @@
   background: rgba(0, 0, 0, 0.15);
   pointer-events: none;
 }
+
+/* FX layer (DOM particles) */
+#vrm-pet-overlay .vrm-pet-fx {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+#vrm-pet-overlay .vrm-pet-heart {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  background: rgba(255, 93, 162, 0.95);
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.25));
+  animation: vrmPetHeart var(--vrmPetDur, 700ms) ease-out forwards;
+}
+
+#vrm-pet-overlay .vrm-pet-heart::before,
+#vrm-pet-overlay .vrm-pet-heart::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: inherit;
+}
+
+#vrm-pet-overlay .vrm-pet-heart::before {
+  left: -5px;
+  top: 0;
+}
+
+#vrm-pet-overlay .vrm-pet-heart::after {
+  left: 0;
+  top: -5px;
+}
+
+@keyframes vrmPetHeart {
+  from {
+    opacity: 0.0;
+    transform: translate(-50%, -50%) rotate(45deg) scale(0.85);
+  }
+  10% {
+    opacity: 1.0;
+  }
+  to {
+    opacity: 0.0;
+    transform: translate(calc(-50% + var(--vrmPetDx, 0px)), calc(-50% - var(--vrmPetLift, 42px))) rotate(45deg) scale(1.35);
+  }
+}
