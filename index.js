@@ -86,6 +86,10 @@ const DEFAULT_CONFIG = {
     relaxArmsEnabled: true,
     // How far to lower arms from a typical T-pose (deg).
     relaxArmsDownDeg: 55,
+    // Pull arms slightly forward to avoid hands going inside the torso (deg).
+    relaxArmsForwardDeg: 10,
+    // Push arms slightly outward to avoid clipping (deg).
+    relaxArmsOutDeg: 8,
     // Slight elbow bend (deg).
     relaxArmsElbowBendDeg: 16,
 
@@ -970,20 +974,27 @@ function applyRelaxOrDragPose(delta) {
 
     const downDegRaw = Number(pluginConfig.relaxArmsDownDeg);
     const downDeg = Number.isFinite(downDegRaw) ? clamp(downDegRaw, 0, 80) : 55;
+    const fwdDegRaw = Number(pluginConfig.relaxArmsForwardDeg);
+    const fwdDeg = Number.isFinite(fwdDegRaw) ? clamp(fwdDegRaw, -25, 35) : 10;
+    const outDegRaw = Number(pluginConfig.relaxArmsOutDeg);
+    const outDeg = Number.isFinite(outDegRaw) ? clamp(outDegRaw, -25, 25) : 8;
     const bendDegRaw = Number(pluginConfig.relaxArmsElbowBendDeg);
     const bendDeg = Number.isFinite(bendDegRaw) ? clamp(bendDegRaw, 0, 35) : 16;
 
     const down = THREE.MathUtils.degToRad(downDeg);
+    const fwd = THREE.MathUtils.degToRad(fwdDeg);
+    const out = THREE.MathUtils.degToRad(outDeg);
     const bend = THREE.MathUtils.degToRad(bendDeg);
 
     // Most VRM rigs: lowering arms from T-pose looks reasonable by rolling upper arms around Z.
     if (lUA) {
-        eTmp.set(0, 0, +down, "XYZ");
+        // Add a small forward + outward bias so hands stay visible instead of clipping into the chest.
+        eTmp.set(-fwd, +out, +down, "XYZ");
         qTmp.setFromEuler(eTmp);
         lUA.quaternion.multiply(qTmp);
     }
     if (rUA) {
-        eTmp.set(0, 0, -down, "XYZ");
+        eTmp.set(-fwd, -out, -down, "XYZ");
         qTmp.setFromEuler(eTmp);
         rUA.quaternion.multiply(qTmp);
     }
@@ -2244,6 +2255,24 @@ function createSettingsInterface() {
           </div>
 
           <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">向前一点：<span id="${MODULE_NAME}_relax_arms_fwd_val">${Number.isFinite(Number(pluginConfig.relaxArmsForwardDeg)) ? Math.round(Number(pluginConfig.relaxArmsForwardDeg)) : 10}</span>°</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_relax_arms_fwd" min="-25" max="35" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsForwardDeg)) ? Math.round(Number(pluginConfig.relaxArmsForwardDeg)) : 10}">
+              </div>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">向外一点：<span id="${MODULE_NAME}_relax_arms_out_val">${Number.isFinite(Number(pluginConfig.relaxArmsOutDeg)) ? Math.round(Number(pluginConfig.relaxArmsOutDeg)) : 8}</span>°</div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_relax_arms_out" min="-25" max="25" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsOutDeg)) ? Math.round(Number(pluginConfig.relaxArmsOutDeg)) : 8}">
+              </div>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
               <div class="settings-title-text">拖拽“被提起来”动作</div>
               <div class="settings-title-description">拖动桌宠时手臂会有被拎起的摆动感</div>
@@ -2547,6 +2576,24 @@ function bindSettingsEvents() {
             const deg = Number.isFinite(v) ? clamp(v, 0, 35) : 16;
             pluginConfig.relaxArmsElbowBendDeg = deg;
             const out = document.getElementById(`${MODULE_NAME}_relax_arms_bend_val`);
+            if (out) out.textContent = String(Math.round(deg));
+            saveSettings();
+        }
+
+        if (t.id === `${MODULE_NAME}_relax_arms_fwd`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            const deg = Number.isFinite(v) ? clamp(v, -25, 35) : 10;
+            pluginConfig.relaxArmsForwardDeg = deg;
+            const out = document.getElementById(`${MODULE_NAME}_relax_arms_fwd_val`);
+            if (out) out.textContent = String(Math.round(deg));
+            saveSettings();
+        }
+
+        if (t.id === `${MODULE_NAME}_relax_arms_out`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            const deg = Number.isFinite(v) ? clamp(v, -25, 25) : 8;
+            pluginConfig.relaxArmsOutDeg = deg;
+            const out = document.getElementById(`${MODULE_NAME}_relax_arms_out_val`);
             if (out) out.textContent = String(Math.round(deg));
             saveSettings();
         }
