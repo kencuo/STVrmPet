@@ -91,15 +91,16 @@
 
 /* Radial menu (right-click / long-press on the pet) */
 #vrm-pet-overlay .vrm-pet-radial-overlay {
-  position: absolute;
+  /* Full-viewport overlay so the menu isn't clipped by the 240×240 pet box. */
+  position: fixed;
   inset: 0;
-  z-index: 10020; /* above canvas + FX */
+  z-index: 10020;
   background: transparent;
   touch-action: none;
 }
 
 #vrm-pet-overlay .vrm-pet-quick-menu {
-  position: absolute;
+  position: fixed; /* positioned via JS */
   width: 200px;
   padding: 8px;
   border-radius: 14px;
@@ -216,13 +217,12 @@
   background: rgba(0, 0, 0, 0.25);
   backdrop-filter: blur(3px);
   touch-action: none;
-  display: grid;
-  place-items: center;
+  display: block; /* we position the panel near the pet via JS */
 }
 
 #vrm-pet-overlay .vrm-pet-chat {
-  width: min(42vw, 520px);
-  height: min(42vh, 520px);
+  width: min(48vw, 620px);
+  height: min(60vh, 700px);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.96);
   border: 1.5px solid rgba(224, 198, 247, 0.95);
@@ -239,13 +239,12 @@
   background: rgba(0, 0, 0, 0.25);
   backdrop-filter: blur(3px);
   touch-action: none;
-  display: grid;
-  place-items: center;
+  display: block; /* we position the panel near the pet via JS */
 }
 
 #vrm-pet-overlay .vrm-pet-editor {
-  width: min(42vw, 520px);
-  height: min(42vh, 520px);
+  width: min(48vw, 620px);
+  height: min(60vh, 700px);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.96);
   border: 1.5px solid rgba(224, 198, 247, 0.95);
