@@ -24,6 +24,10 @@ const DEFAULT_CONFIG = {
     showOverlay: true,
     overlayWidth: 240,
     overlayHeight: 240,
+    // Show a rounded background/border behind the model.
+    overlayFrameEnabled: false,
+    // 0.0 - 0.9 (only used when overlayFrameEnabled=true)
+    overlayFrameOpacity: 0.35,
     // Scales the loaded VRM model (relative).
     modelScale: 1.0,
     // Make the pet window wander around the desktop.
@@ -181,6 +185,23 @@ function ensureOverlay() {
     }
 
     bindOverlayDrag(el);
+
+    // Frame (background/border) can be disabled for a "pure model" look.
+    try {
+        const shell = el.querySelector(".vrm-pet-shell");
+        if (shell) {
+            const enabled = !!pluginConfig.overlayFrameEnabled;
+            const o = Number(pluginConfig.overlayFrameOpacity);
+            const opacity = Number.isFinite(o) ? clamp(o, 0, 0.9) : 0.35;
+            shell.style.background = enabled
+                ? `rgba(0, 0, 0, ${opacity})`
+                : "transparent";
+            shell.style.border = enabled
+                ? "1px solid rgba(255, 255, 255, 0.12)"
+                : "none";
+            shell.style.backdropFilter = enabled ? "blur(6px)" : "none";
+        }
+    } catch (_) {}
 
     // Ensure renderer is mounted once overlay exists.
     ensureRenderer(el).catch((err) => {
@@ -426,6 +447,12 @@ function updateWanderGait(delta) {
     const lUA = bones.leftUpperArm;
     const rLA = bones.rightLowerArm;
     const lLA = bones.leftLowerArm;
+    const lUL = bones.leftUpperLeg;
+    const rUL = bones.rightUpperLeg;
+    const lLL = bones.leftLowerLeg;
+    const rLL = bones.rightLowerLeg;
+    const lF = bones.leftFoot;
+    const rF = bones.rightFoot;
 
     // Subtle vertical bob.
     if (hips && rest.hips) {
@@ -480,6 +507,48 @@ function updateWanderGait(delta) {
         eTmp.set(-elbow * (0.35 + 0.65 * Math.abs(s)), 0, 0, "XYZ");
         qTmp.setFromEuler(eTmp);
         rLA.quaternion.multiply(qTmp);
+    }
+
+    // Leg swing (simple walk cycle).
+    // Note: raw bone axes can vary by model, but this is usually "good enough" for a cute overlay gait.
+    const legSwing = THREE.MathUtils.degToRad(28) * intensity;
+    if (lUL) {
+        eTmp.set(-legSwing * s * 0.9, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        lUL.quaternion.multiply(qTmp);
+    }
+    if (rUL) {
+        eTmp.set(legSwing * s * 0.9, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        rUL.quaternion.multiply(qTmp);
+    }
+
+    // Knee bend: bend more when the leg is moving back (approx) + always a bit for "bounce".
+    const knee = THREE.MathUtils.degToRad(26) * intensity;
+    const kneeL = Math.max(0, -s); // left bends when left leg goes back
+    const kneeR = Math.max(0, s);  // right bends when right leg goes back
+    if (lLL) {
+        eTmp.set(-knee * (0.15 + 0.85 * kneeL), 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        lLL.quaternion.multiply(qTmp);
+    }
+    if (rLL) {
+        eTmp.set(-knee * (0.15 + 0.85 * kneeR), 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        rLL.quaternion.multiply(qTmp);
+    }
+
+    // Foot compensation so it doesn't look like toes are always pointing down.
+    const foot = THREE.MathUtils.degToRad(10) * intensity;
+    if (lF) {
+        eTmp.set(foot * kneeL, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        lF.quaternion.multiply(qTmp);
+    }
+    if (rF) {
+        eTmp.set(foot * kneeR, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        rF.quaternion.multiply(qTmp);
     }
 }
 
@@ -678,7 +747,8 @@ function replaceVrmMaterialsForCompatibility(root) {
                 map: mapTex,
                 transparent: !!m.transparent,
                 opacity: typeof m.opacity === "number" ? m.opacity : 1,
-                side: m.side,
+                // For the overlay, DoubleSide avoids "hair disappears when side-walking" on plane-based meshes.
+                side: THREE.DoubleSide,
             });
 
             // Ensure baseColor textures show correct colors (srgb).
@@ -695,9 +765,7 @@ function replaceVrmMaterialsForCompatibility(root) {
             // Only enable vertex colors as a last resort when no texture is present and the source material opted into it.
             if (!base.map && m.vertexColors === true) base.vertexColors = true;
 
-            // If side is unset/unknown, double-side is usually safer for "pet overlay" rendering.
-            if (base.side === undefined || base.side === null)
-                base.side = THREE.DoubleSide;
+            // Always double-side in overlay.
 
             // Skinned meshes need skinning enabled on the material.
             if (obj.isSkinnedMesh) base.skinning = true;
@@ -891,6 +959,12 @@ function initPetActionRig(vrm) {
         "leftLowerArm",
         "rightUpperArm",
         "rightLowerArm",
+        "leftUpperLeg",
+        "leftLowerLeg",
+        "leftFoot",
+        "rightUpperLeg",
+        "rightLowerLeg",
+        "rightFoot",
     ];
 
     const bones = {};
@@ -937,6 +1011,8 @@ function playPetAction(actionName) {
     if (actionName === "nod") duration = 0.8;
     if (actionName === "bounce") duration = 0.7;
     if (actionName === "wave") duration = 1.0;
+    if (actionName === "tilt") duration = 0.9;
+    if (actionName === "cheer") duration = 0.9;
 
     vrmRenderState.petAction.active = actionName;
     vrmRenderState.petAction.t = 0;
@@ -946,7 +1022,10 @@ function playPetAction(actionName) {
 
 function playRandomPetAction(kind = "gen") {
     // Small set of "cute" actions.
-    const pool = kind === "tap" ? ["tap", "nod", "wave"] : ["nod", "bounce", "wave"];
+    const pool =
+        kind === "tap"
+            ? ["tap", "nod", "wave", "tilt", "cheer"]
+            : ["nod", "bounce", "wave", "tilt"];
     const idx = Math.floor(Math.random() * pool.length);
     playPetAction(pool[idx]);
 }
@@ -980,6 +1059,7 @@ function updatePetAction(delta) {
     const rUA = bones.rightUpperArm;
     const rLA = bones.rightLowerArm;
     const lUA = bones.leftUpperArm;
+    const lLA = bones.leftLowerArm;
 
     if (a === "tap") {
         // Tiny bounce + quick nod.
@@ -1051,6 +1131,66 @@ function updatePetAction(delta) {
             eTmp.set(0, 0, -amp * e, "XYZ");
             qTmp.setFromEuler(eTmp);
             lUA.quaternion.multiply(qTmp);
+        }
+    } else if (a === "tilt") {
+        // Cute head tilt + tiny shoulder/arm counterbalance.
+        if (head) {
+            const tilt = THREE.MathUtils.degToRad(18);
+            const roll = Math.sin(p * Math.PI * 2) * 0.55;
+            eTmp.set(0, 0, tilt * roll, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            head.quaternion.multiply(qTmp);
+        }
+        if (neck) {
+            const tilt = THREE.MathUtils.degToRad(10);
+            const roll = Math.sin(p * Math.PI * 2) * 0.45;
+            eTmp.set(0, 0, tilt * roll, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            neck.quaternion.multiply(qTmp);
+        }
+        if (lUA) {
+            const amp = THREE.MathUtils.degToRad(10);
+            eTmp.set(amp * (0.2 + 0.8 * e), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lUA.quaternion.multiply(qTmp);
+        }
+        if (rUA) {
+            const amp = THREE.MathUtils.degToRad(10);
+            eTmp.set(-amp * (0.2 + 0.8 * e), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rUA.quaternion.multiply(qTmp);
+        }
+    } else if (a === "cheer") {
+        // Both arms up + small bounce.
+        if (hips && rest.hips) {
+            const amp = 0.06;
+            hips.position.y =
+                rest.hips.position.y +
+                amp * Math.sin(Math.PI * p) * (0.35 + 0.65 * (1 - p));
+        }
+        const raise = THREE.MathUtils.degToRad(55) * e;
+        const out = THREE.MathUtils.degToRad(14) * Math.sin(p * Math.PI * 2 * 3) * (0.25 + 0.75 * (1 - p));
+        if (lUA) {
+            eTmp.set(-raise, 0, -out, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lUA.quaternion.multiply(qTmp);
+        }
+        if (rUA) {
+            eTmp.set(-raise, 0, out, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rUA.quaternion.multiply(qTmp);
+        }
+        if (lLA) {
+            const bend = THREE.MathUtils.degToRad(18);
+            eTmp.set(-bend * (0.4 + 0.6 * e), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lLA.quaternion.multiply(qTmp);
+        }
+        if (rLA) {
+            const bend = THREE.MathUtils.degToRad(18);
+            eTmp.set(-bend * (0.4 + 0.6 * e), 0, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rLA.quaternion.multiply(qTmp);
         }
     }
 
@@ -1145,7 +1285,9 @@ function fitCameraToObject(object3d) {
     // Fit camera to bounding box based on FOV & aspect.
     const fov = THREE.MathUtils.degToRad(cam.fov);
     const fitHeight = size.y / (2 * Math.tan(fov / 2));
-    const fitWidth = size.x / (2 * Math.tan(fov / 2)) / (cam.aspect || 1);
+    // Use diagonal XZ to better tolerate model yaw (e.g. 45deg side-walk) without clipping hair/skirts.
+    const sizeXZ = Math.hypot(size.x, size.z);
+    const fitWidth = sizeXZ / (2 * Math.tan(fov / 2)) / (cam.aspect || 1);
     const distance = 1.25 * Math.max(fitHeight, fitWidth, size.z);
 
     cam.near = Math.max(0.01, distance / 100);
@@ -1415,6 +1557,26 @@ function createSettingsInterface() {
           </div>
 
           <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">显示外框</div>
+              <div class="settings-title-description">关闭后桌宠只显示模型（更像“无边框”）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_frame_enabled" class="toggle-input" ${pluginConfig.overlayFrameEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_frame_enabled" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn wide100p">
+              <div class="settings-title-text">外框透明度：<span id="${MODULE_NAME}_frame_opacity_val">${Number.isFinite(Number(pluginConfig.overlayFrameOpacity)) ? Number(pluginConfig.overlayFrameOpacity).toFixed(2) : "0.35"}</span></div>
+              <div class="range-row">
+                <input type="range" id="${MODULE_NAME}_frame_opacity" min="0" max="0.9" step="0.05" value="${Number.isFinite(Number(pluginConfig.overlayFrameOpacity)) ? Number(pluginConfig.overlayFrameOpacity) : 0.35}">
+              </div>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
               <div class="settings-title-text">Model scale: <span id="${MODULE_NAME}_model_scale_val">${Number(pluginConfig.modelScale || 1).toFixed(2)}</span>x</div>
               <div class="range-row">
@@ -1573,6 +1735,13 @@ function bindSettingsEvents() {
             ).checked;
             saveSettings();
         }
+        if (t.id === `${MODULE_NAME}_frame_enabled`) {
+            pluginConfig.overlayFrameEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
+            saveSettings();
+            ensureOverlay();
+        }
         if (t.id === `${MODULE_NAME}_wander_enabled`) {
             pluginConfig.wanderEnabled = /** @type {HTMLInputElement} */ (t).checked;
             // Nudge it to start moving soon.
@@ -1657,6 +1826,18 @@ function bindSettingsEvents() {
             ensureOverlay();
         }
 
+        if (t.id === `${MODULE_NAME}_frame_opacity`) {
+            const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
+            pluginConfig.overlayFrameOpacity = Number.isFinite(v)
+                ? clamp(v, 0, 0.9)
+                : DEFAULT_CONFIG.overlayFrameOpacity;
+            const out = document.getElementById(`${MODULE_NAME}_frame_opacity_val`);
+            if (out)
+                out.textContent = Number(pluginConfig.overlayFrameOpacity ?? 0.35).toFixed(2);
+            saveSettings();
+            ensureOverlay();
+        }
+
         if (t.id === `${MODULE_NAME}_model_scale`) {
             const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
             pluginConfig.modelScale = Number.isFinite(v)
@@ -1693,6 +1874,8 @@ function bindSettingsEvents() {
             const out = document.getElementById(`${MODULE_NAME}_wander_face_angle_val`);
             if (out) out.textContent = String(Math.round(deg));
             saveSettings();
+            // Camera fit uses diagonal XZ now; this is mostly optional, but refit helps immediately.
+            applyModelScaleAndRefit();
         }
     });
 
