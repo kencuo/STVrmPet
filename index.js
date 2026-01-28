@@ -192,6 +192,7 @@ const vrmRenderState = {
     ui: {
         menuOpen: false,
         chatOpen: false,
+        editorOpen: false,
         longPressTimer: null,
         longPressTriggered: false,
         longPressStart: null,
@@ -260,6 +261,7 @@ function ensureOverlay() {
         el.id = "vrm-pet-overlay";
         el.innerHTML = `
       <div class="vrm-pet-shell" title="Drag to move">
+        <button class="vrm-pet-menu-btn" type="button" title="菜单">≡</button>
         <div class="vrm-pet-stage"></div>
         <div class="vrm-pet-hint" id="vrm-pet-hint">未加载模型<br/>可在设置里上传并绑定 VRM</div>
       </div>
@@ -289,6 +291,7 @@ function ensureOverlay() {
     }
 
     bindOverlayDrag(el);
+    bindOverlayMenuButton(el);
 
     // Frame (background/border) can be disabled for a "pure model" look.
     try {
@@ -311,7 +314,7 @@ function ensureOverlay() {
     ensureRenderer(el).catch((err) => {
         console.error("[VRM Pet] Renderer init failed", err);
         setHint(
-            `渲染初始化失败：${err instanceof Error ? err.message : String(err)}`,
+            `娓叉煋鍒濆鍖栧け璐ワ細${err instanceof Error ? err.message : String(err)}`,
         );
     });
 }
@@ -367,7 +370,12 @@ function bindOverlayDrag(overlayEl) {
         // Don't start drag on right-click (we use it for the radial menu on the model canvas).
         if (typeof e.button === "number" && e.button === 2) return;
         // When the radial menu is open, don't allow dragging.
-        if (vrmRenderState.ui?.menuOpen || vrmRenderState.ui?.chatOpen) return;
+        if (
+            vrmRenderState.ui?.menuOpen ||
+            vrmRenderState.ui?.chatOpen ||
+            vrmRenderState.ui?.editorOpen
+        )
+            return;
         markInteraction();
         dragging = false;
         captured = false;
@@ -382,7 +390,12 @@ function bindOverlayDrag(overlayEl) {
 
     shell.addEventListener("pointermove", (e) => {
         // When the radial menu is open, ignore drag moves (prevents accidental dragging after long-press).
-        if (vrmRenderState.ui?.menuOpen || vrmRenderState.ui?.chatOpen) return;
+        if (
+            vrmRenderState.ui?.menuOpen ||
+            vrmRenderState.ui?.chatOpen ||
+            vrmRenderState.ui?.editorOpen
+        )
+            return;
         if (pointerId !== e.pointerId || !start) return;
         const dx = e.clientX - start.x;
         const dy = e.clientY - start.y;
@@ -469,6 +482,27 @@ function bindOverlayDrag(overlayEl) {
     shell.addEventListener("pointercancel", stop);
 }
 
+function bindOverlayMenuButton(overlayEl) {
+    const shell = overlayEl?.querySelector?.(".vrm-pet-shell");
+    if (!shell) return;
+    const btn = shell.querySelector(".vrm-pet-menu-btn");
+    if (!btn) return;
+    if (btn.__vrmPetMenuBound) return;
+    btn.__vrmPetMenuBound = true;
+
+    btn.addEventListener("pointerdown", (e) => {
+        // Don't let this start a drag.
+        e.stopPropagation();
+    });
+
+    btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const r = btn.getBoundingClientRect();
+        showPetRadialMenu(r.left + r.width / 2, r.top + r.height / 2);
+    });
+}
+
 function getSendTextarea() {
     /** @type {HTMLTextAreaElement|null} */
     const el = document.querySelector("#send_textarea");
@@ -511,6 +545,14 @@ function getPetPersonaForCurrentCharacter() {
     return typeof p === "string" ? p : "";
 }
 
+function getPetSystemPromptExtraForCurrentCharacter() {
+    const character = getCurrentCharacter();
+    if (!character) return "";
+    const ext = getCharacterExtensionData(character) || {};
+    const p = ext?.petSystemPromptExtra;
+    return typeof p === "string" ? p : "";
+}
+
 async function savePetPersonaForCurrentCharacter(personaText) {
     const ctx = getContext();
     const character = getCurrentCharacter();
@@ -521,6 +563,21 @@ async function savePetPersonaForCurrentCharacter(personaText) {
     const next = mergeDeep(existing, {
         petPersona: String(personaText ?? "").trim(),
         petPersonaUpdatedAt: Date.now(),
+    });
+    await ctx.writeExtensionField(ctx.characterId, MODULE_NAME, next);
+    return next;
+}
+
+async function savePetSystemPromptExtraForCurrentCharacter(extraText) {
+    const ctx = getContext();
+    const character = getCurrentCharacter();
+    if (!character)
+        throw new Error("No character selected (group chat not supported yet)");
+
+    const existing = getCharacterExtensionData(character) || {};
+    const next = mergeDeep(existing, {
+        petSystemPromptExtra: String(extraText ?? "").trim(),
+        petSystemPromptExtraUpdatedAt: Date.now(),
     });
     await ctx.writeExtensionField(ctx.characterId, MODULE_NAME, next);
     return next;
@@ -584,8 +641,142 @@ function removePetChatModal() {
     if (vrmRenderState.ui) vrmRenderState.ui.chatOpen = false;
 }
 
+function removePetEditorModal() {
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    const shell = overlayEl?.querySelector?.(".vrm-pet-shell") ?? null;
+    const el = shell?.querySelector?.(".vrm-pet-editor-overlay") ?? null;
+    try {
+        el?.remove?.();
+    } catch (_) {}
+    if (vrmRenderState.ui) vrmRenderState.ui.editorOpen = false;
+}
+
+function showPetEditorModal(kind) {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    const character = getCurrentCharacter();
+    if (!character) {
+        toastr?.warning?.("Select a character first (group chat not supported yet).", "VRM Pet");
+        return;
+    }
+
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    const shell = overlayEl?.querySelector?.(".vrm-pet-shell") ?? null;
+    if (!overlayEl || !shell) return;
+
+    removePetEditorModal();
+    if (vrmRenderState.ui) vrmRenderState.ui.editorOpen = true;
+
+    const isPersona = kind === "persona";
+    const titleText = isPersona ? "桌宠人设" : "提示词补充";
+    const initial = isPersona
+        ? getPetPersonaForCurrentCharacter()
+        : getPetSystemPromptExtraForCurrentCharacter();
+
+    const overlay = document.createElement("div");
+    overlay.className = "vrm-pet-editor-overlay";
+    overlay.addEventListener(
+        "pointerdown",
+        (e) => {
+            if (e.target === overlay) {
+                e.preventDefault();
+                e.stopPropagation();
+                removePetEditorModal();
+            }
+        },
+        { capture: true },
+    );
+
+    const panel = document.createElement("div");
+    panel.className = "vrm-pet-editor";
+    panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+
+    const header = document.createElement("div");
+    header.className = "vrm-pet-editor-header";
+
+    const title = document.createElement("div");
+    title.className = "vrm-pet-editor-title";
+    title.textContent = titleText;
+
+    const btnClose = document.createElement("button");
+    btnClose.type = "button";
+    btnClose.className = "vrm-pet-editor-btn";
+    btnClose.textContent = "×";
+    btnClose.title = "关闭";
+    btnClose.addEventListener("click", (e) => {
+        e.preventDefault();
+        removePetEditorModal();
+    });
+
+    header.appendChild(title);
+    header.appendChild(btnClose);
+
+    const ta = document.createElement("textarea");
+    ta.className = "vrm-pet-editor-textarea";
+    ta.placeholder = isPersona
+        ? "写桌宠专用人设（不会修改角色卡原有人设）"
+        : "写桌宠系统提示词补充（可选）";
+    ta.value = String(initial || "");
+
+    const actions = document.createElement("div");
+    actions.className = "vrm-pet-editor-actions";
+
+    const btnCancel = document.createElement("button");
+    btnCancel.type = "button";
+    btnCancel.className = "vrm-pet-editor-mini";
+    btnCancel.textContent = "取消";
+    btnCancel.addEventListener("click", (e) => {
+        e.preventDefault();
+        removePetEditorModal();
+    });
+
+    const btnSave = document.createElement("button");
+    btnSave.type = "button";
+    btnSave.className = "vrm-pet-editor-save";
+    btnSave.textContent = "保存";
+
+    actions.appendChild(btnCancel);
+    actions.appendChild(btnSave);
+
+    panel.appendChild(header);
+    panel.appendChild(ta);
+    panel.appendChild(actions);
+
+    overlay.appendChild(panel);
+    shell.appendChild(overlay);
+
+    const save = async () => {
+        const v = String(ta.value ?? "").trim();
+        btnSave.disabled = true;
+        try {
+            if (isPersona) await savePetPersonaForCurrentCharacter(v);
+            else await savePetSystemPromptExtraForCurrentCharacter(v);
+            toastr?.success?.("已保存", "VRM Pet");
+            removePetEditorModal();
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            toastr?.error?.(msg, "VRM Pet");
+        } finally {
+            btnSave.disabled = false;
+        }
+    };
+
+    btnSave.addEventListener("click", (e) => {
+        e.preventDefault();
+        save().catch(() => {});
+    });
+
+    try {
+        ta.focus();
+    } catch (_) {}
+}
+
 function buildPetSystemPrompt(persona) {
-    return [PET_AI_SYSTEM_PROMPT_BASE, persona ? `Character persona:\n${persona}` : ""]
+    const extra = getPetSystemPromptExtraForCurrentCharacter();
+    return [
+        PET_AI_SYSTEM_PROMPT_BASE,
+        persona ? `Character persona:\n${persona}` : "",
+        extra ? `Extra instructions:\n${extra}` : "",
+    ]
         .filter(Boolean)
         .join("\n\n");
 }
@@ -624,7 +815,7 @@ function showPetChatModal() {
     if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
     const character = getCurrentCharacter();
     if (!character) {
-        toastr?.warning?.("请先选择一个角色（当前不支持群聊）", "VRM Pet");
+        toastr?.warning?.("璇峰厛閫夋嫨涓€涓鑹诧紙褰撳墠涓嶆敮鎸佺兢鑱婏級", "VRM Pet");
         return;
     }
 
@@ -659,13 +850,13 @@ function showPetChatModal() {
 
     const title = document.createElement("div");
     title.className = "vrm-pet-chat-title";
-    title.textContent = "VRM Pet Chat";
+    title.textContent = "桌宠聊天";
 
     const btnClose = document.createElement("button");
     btnClose.type = "button";
     btnClose.className = "vrm-pet-chat-btn";
     btnClose.textContent = "×";
-    btnClose.title = "关闭";
+    btnClose.title = "Close";
     btnClose.addEventListener("click", (e) => {
         e.preventDefault();
         removePetChatModal();
@@ -696,6 +887,11 @@ function showPetChatModal() {
     const footer = document.createElement("div");
     footer.className = "vrm-pet-chat-footer";
 
+    const btnPrompt = document.createElement("button");
+    btnPrompt.type = "button";
+    btnPrompt.className = "vrm-pet-chat-mini";
+    btnPrompt.textContent = "提示词";
+
     const btnPersona = document.createElement("button");
     btnPersona.type = "button";
     btnPersona.className = "vrm-pet-chat-mini";
@@ -706,6 +902,7 @@ function showPetChatModal() {
     btnClear.className = "vrm-pet-chat-mini";
     btnClear.textContent = "清空";
 
+    footer.appendChild(btnPrompt);
     footer.appendChild(btnPersona);
     footer.appendChild(btnClear);
 
@@ -800,18 +997,14 @@ function showPetChatModal() {
         }
     });
 
-    btnPersona.addEventListener("click", async (e) => {
+    btnPersona.addEventListener("click", (e) => {
         e.preventDefault();
-        try {
-            const current = getPetPersonaForCurrentCharacter();
-            const next = prompt("设置/修改桌宠人设（会保存到当前角色扩展字段）", current || "");
-            if (next === null) return;
-            await savePetPersonaForCurrentCharacter(next);
-            toastr?.success?.("已保存人设", "VRM Pet");
-        } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            toastr?.error?.(msg, "VRM Pet");
-        }
+        showPetEditorModal("persona");
+    });
+
+    btnPrompt.addEventListener("click", (e) => {
+        e.preventDefault();
+        showPetEditorModal("prompt");
     });
 
     btnClear.addEventListener("click", async (e) => {
@@ -852,12 +1045,7 @@ function showPetRadialMenu(clientX, clientY) {
     if (vrmRenderState.ui) vrmRenderState.ui.menuOpen = true;
 
     const rect = shell.getBoundingClientRect();
-    const half = 110; // matches CSS width/height 220
-    const margin = 8;
-    const x0 = clientX - rect.left;
-    const y0 = clientY - rect.top;
-    const x = clamp(x0, half + margin, rect.width - half - margin);
-    const y = clamp(y0, half + margin, rect.height - half - margin);
+    const margin = 10;
 
     const overlay = document.createElement("div");
     overlay.className = "vrm-pet-radial-overlay";
@@ -879,64 +1067,54 @@ function showPetRadialMenu(clientX, clientY) {
     });
 
     const menu = document.createElement("div");
-    menu.className = "vrm-pet-radial-menu";
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
+    menu.className = "vrm-pet-quick-menu";
     menu.addEventListener("pointerdown", (e) => {
         // keep events from reaching drag handlers
         e.stopPropagation();
     });
 
-    const center = document.createElement("button");
-    center.type = "button";
-    center.className = "vrm-pet-radial-center";
-    center.textContent = "×";
-    center.title = "关闭";
-    center.addEventListener("click", (e) => {
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "vrm-pet-quick-close";
+    close.textContent = "×";
+    close.title = "关闭";
+    close.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
         removePetRadialMenu();
     });
 
     const items = [
-        { id: "persona", icon: "📝", label: "人设" },
-        { id: "chat", icon: "💬", label: "聊天" },
-        { id: "ai", icon: "🤖", label: "AI回复" },
+        { id: "chat", label: "聊天" },
+        { id: "persona", label: "人设" },
+        { id: "prompt", label: "提示词" },
+        { id: "ai", label: "AI 回复（填入输入框）" },
     ];
 
-    const radius = 78;
-    const startDeg = -90;
-    const stepDeg = 360 / Math.max(1, items.length);
-
-    const mkItem = (it, angleDeg) => {
+    const mkItem = (it) => {
         const btn = document.createElement("button");
         btn.type = "button";
-        btn.className = "vrm-pet-radial-item";
+        btn.className = "vrm-pet-quick-item";
         btn.dataset.action = it.id;
-        btn.style.setProperty("--angle", `${angleDeg}deg`);
-        btn.style.setProperty("--radius", `${radius}px`);
-
-        const icon = document.createElement("div");
-        icon.className = "vrm-pet-radial-icon";
-        icon.textContent = it.icon;
-        const label = document.createElement("div");
-        label.className = "vrm-pet-radial-label";
-        label.textContent = it.label;
-        btn.appendChild(icon);
-        btn.appendChild(label);
+        btn.textContent = it.label;
         return btn;
     };
 
-    for (let i = 0; i < items.length; i++) {
-        const a = startDeg + i * stepDeg;
-        menu.appendChild(mkItem(items[i], a));
-    }
-    menu.appendChild(center);
+    for (const it of items) menu.appendChild(mkItem(it));
+    menu.appendChild(close);
+
+    // Position after DOM is known (based on menu height).
+    const menuW = 200;
+    const menuH = 12 + items.length * 44;
+    const x = clamp(clientX - rect.left, margin, rect.width - menuW - margin);
+    const y = clamp(clientY - rect.top, margin, rect.height - menuH - margin);
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
 
     menu.addEventListener("click", async (e) => {
         const t = e.target;
         if (!(t instanceof HTMLElement)) return;
-        const btn = t.closest?.(".vrm-pet-radial-item");
+        const btn = t.closest?.(".vrm-pet-quick-item");
         const action = btn?.dataset?.action ?? "";
         if (!action) return;
         e.preventDefault();
@@ -945,11 +1123,11 @@ function showPetRadialMenu(clientX, clientY) {
 
         try {
             if (action === "persona") {
-                const current = getPetPersonaForCurrentCharacter();
-                const next = prompt("设置/修改桌宠人设（会保存到当前角色扩展字段）", current || "");
-                if (next === null) return;
-                await savePetPersonaForCurrentCharacter(next);
-                toastr?.success?.("已保存人设", "VRM Pet");
+                showPetEditorModal("persona");
+                return;
+            }
+            if (action === "prompt") {
+                showPetEditorModal("prompt");
                 return;
             }
             if (action === "chat") {
@@ -978,10 +1156,7 @@ function showPetRadialMenu(clientX, clientY) {
                     lines.push(`${who}: ${mes}`);
                 }
 
-                const systemPrompt = [
-                    PET_AI_SYSTEM_PROMPT_BASE,
-                    persona ? `Character persona:\n${persona}` : "",
-                ].filter(Boolean).join("\n\n");
+                const systemPrompt = buildPetSystemPrompt(persona);
 
                 const promptText = [
                     `Conversation (most recent last):`,
@@ -2632,7 +2807,7 @@ async function loadVrmFromUrl(url) {
     const normalizedUrl = String(url || "").trim();
     if (!normalizedUrl) {
         disposeCurrentVrm();
-        setHint("当前角色未绑定 VRM\n可在设置里上传并绑定");
+        setHint("褰撳墠瑙掕壊鏈粦瀹?VRM\n鍙湪璁剧疆閲屼笂浼犲苟缁戝畾");
         return;
     }
 
@@ -2691,7 +2866,7 @@ async function loadVrmFromUrl(url) {
                 } catch (e) {
                     console.error("[VRM Pet] VRM init failed", e);
                     setHint(
-                        `模型初始化失败：${e instanceof Error ? e.message : String(e)}`,
+                        `妯″瀷鍒濆鍖栧け璐ワ細${e instanceof Error ? e.message : String(e)}`,
                     );
                 }
                 resolve();
@@ -2791,8 +2966,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">启用 VRM Pet</div>
-              <div class="settings-title-description">每个角色可绑定一个 VRM；右下角显示桌宠（可拖动）</div>
+              <div class="settings-title-text">鍚敤 VRM Pet</div>
+              <div class="settings-title-description">姣忎釜瑙掕壊鍙粦瀹氫竴涓?VRM锛涘彸涓嬭鏄剧ず妗屽疇锛堝彲鎷栧姩锛</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_enabled" class="toggle-input" ${pluginConfig.enabled ? "checked" : ""} />
@@ -2802,8 +2977,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">调试日志</div>
-              <div class="settings-title-description">在控制台输出 VRM 材质/贴图信息（用于排查黑影/没颜色）</div>
+              <div class="settings-title-text">璋冭瘯鏃ュ織</div>
+              <div class="settings-title-description">鍦ㄦ帶鍒跺彴杈撳嚭 VRM 鏉愯川/璐村浘淇℃伅锛堢敤浜庢帓鏌ラ粦褰?娌￠鑹诧級</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_enableLogging" class="toggle-input" ${pluginConfig.enableLogging ? "checked" : ""} />
@@ -2813,13 +2988,13 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">为当前角色上传 VRM</div>
-              <div class="settings-title-description">文件会保存到酒馆服务器（/api/files/upload）</div>
+              <div class="settings-title-text">涓哄綋鍓嶈鑹蹭笂浼?VRM</div>
+              <div class="settings-title-description">鏂囦欢浼氫繚瀛樺埌閰掗鏈嶅姟鍣紙/api/files/upload锛</div>
               <div class="vrm-pet-row marginTop5">
                 <input type="file" id="${MODULE_NAME}_file" accept=".vrm" style="display:none" />
-                <button class="menu_button" id="${MODULE_NAME}_select_btn">选择 VRM 并上传</button>
-                <button class="menu_button" id="${MODULE_NAME}_upload_btn" title="已选文件时可用">上传并绑定</button>
-                <button class="menu_button" id="${MODULE_NAME}_clear_btn">清除当前角色绑定</button>
+                <button class="menu_button" id="${MODULE_NAME}_select_btn">閫夋嫨 VRM 骞朵笂浼?/button>
+                <button class="menu_button" id="${MODULE_NAME}_upload_btn" title="宸查€夋枃浠舵椂鍙敤">涓婁紶骞剁粦瀹?/button>
+                <button class="menu_button" id="${MODULE_NAME}_clear_btn">娓呴櫎褰撳墠瑙掕壊缁戝畾</button>
               </div>
               <div class="vrm-pet-path marginTop5" id="${MODULE_NAME}_selected"></div>
               <div class="vrm-pet-path marginTop5" id="${MODULE_NAME}_current"></div>
@@ -2828,7 +3003,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">VRM 大小限制：<span id="${MODULE_NAME}_max_mb_val">${pluginConfig.maxVrmFileSizeMB}</span>MB</div>
+              <div class="settings-title-text">VRM 澶у皬闄愬埗锛<span id="${MODULE_NAME}_max_mb_val">${pluginConfig.maxVrmFileSizeMB}</span>MB</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_max_mb" min="5" max="300" step="5" value="${pluginConfig.maxVrmFileSizeMB}">
               </div>
@@ -2857,8 +3032,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">显示外框</div>
-              <div class="settings-title-description">关闭后桌宠只显示模型（更像“无边框”）</div>
+              <div class="settings-title-text">鏄剧ず澶栨</div>
+              <div class="settings-title-description">鍏抽棴鍚庢瀹犲彧鏄剧ず妯″瀷锛堟洿鍍忊€滄棤杈规鈥濓級</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_frame_enabled" class="toggle-input" ${pluginConfig.overlayFrameEnabled ? "checked" : ""} />
@@ -2868,7 +3043,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">外框透明度：<span id="${MODULE_NAME}_frame_opacity_val">${Number.isFinite(Number(pluginConfig.overlayFrameOpacity)) ? Number(pluginConfig.overlayFrameOpacity).toFixed(2) : "0.35"}</span></div>
+              <div class="settings-title-text">澶栨閫忔槑搴︼細<span id="${MODULE_NAME}_frame_opacity_val">${Number.isFinite(Number(pluginConfig.overlayFrameOpacity)) ? Number(pluginConfig.overlayFrameOpacity).toFixed(2) : "0.35"}</span></div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_frame_opacity" min="0" max="0.9" step="0.05" value="${Number.isFinite(Number(pluginConfig.overlayFrameOpacity)) ? Number(pluginConfig.overlayFrameOpacity) : 0.35}">
               </div>
@@ -2886,8 +3061,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">桌面走动</div>
-              <div class="settings-title-description">让桌宠窗口在屏幕内来回走动（拖拽/点击会暂时暂停）</div>
+              <div class="settings-title-text">妗岄潰璧板姩</div>
+              <div class="settings-title-description">璁╂瀹犵獥鍙ｅ湪灞忓箷鍐呮潵鍥炶蛋鍔紙鎷栨嫿/鐐瑰嚮浼氭殏鏃舵殏鍋滐級</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_wander_enabled" class="toggle-input" ${pluginConfig.wanderEnabled ? "checked" : ""} />
@@ -2897,7 +3072,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">走动速度：<span id="${MODULE_NAME}_wander_speed_val">${Number(pluginConfig.wanderSpeed) || 80}</span> px/s</div>
+              <div class="settings-title-text">璧板姩閫熷害锛<span id="${MODULE_NAME}_wander_speed_val">${Number(pluginConfig.wanderSpeed) || 80}</span> px/s</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_wander_speed" min="20" max="260" step="10" value="${Number(pluginConfig.wanderSpeed) || 80}">
               </div>
@@ -2906,8 +3081,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">走路摆动</div>
-              <div class="settings-title-description">走动时做“原地走路”的摆臂/点头（不需要外部动作文件）</div>
+              <div class="settings-title-text">璧拌矾鎽嗗姩</div>
+              <div class="settings-title-description">璧板姩鏃跺仛鈥滃師鍦拌蛋璺€濈殑鎽嗚噦/鐐瑰ご锛堜笉闇€瑕佸閮ㄥ姩浣滄枃浠讹級</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_wander_gait_enabled" class="toggle-input" ${pluginConfig.wanderGaitEnabled ? "checked" : ""} />
@@ -2917,7 +3092,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">摆动强度：<span id="${MODULE_NAME}_wander_gait_intensity_val">${Number(pluginConfig.wanderGaitIntensity ?? 1).toFixed(2)}</span>x</div>
+              <div class="settings-title-text">鎽嗗姩寮哄害锛<span id="${MODULE_NAME}_wander_gait_intensity_val">${Number(pluginConfig.wanderGaitIntensity ?? 1).toFixed(2)}</span>x</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_wander_gait_intensity" min="0" max="2" step="0.05" value="${Number.isFinite(Number(pluginConfig.wanderGaitIntensity)) ? Number(pluginConfig.wanderGaitIntensity) : 1}">
               </div>
@@ -2926,8 +3101,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">侧身朝向</div>
-              <div class="settings-title-description">走动时让模型朝向侧面（更像“侧着走”）</div>
+              <div class="settings-title-text">渚ц韩鏈濆悜</div>
+              <div class="settings-title-description">璧板姩鏃惰妯″瀷鏈濆悜渚ч潰锛堟洿鍍忊€滀晶鐫€璧扳€濓級</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_wander_face_enabled" class="toggle-input" ${pluginConfig.wanderFaceEnabled ? "checked" : ""} />
@@ -2937,7 +3112,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">侧身角度：<span id="${MODULE_NAME}_wander_face_angle_val">${Number.isFinite(Number(pluginConfig.wanderFaceAngleDeg)) ? Math.round(Number(pluginConfig.wanderFaceAngleDeg)) : 45}</span>°</div>
+              <div class="settings-title-text">渚ц韩瑙掑害锛<span id="${MODULE_NAME}_wander_face_angle_val">${Number.isFinite(Number(pluginConfig.wanderFaceAngleDeg)) ? Math.round(Number(pluginConfig.wanderFaceAngleDeg)) : 45}</span>掳</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_wander_face_angle" min="0" max="90" step="1" value="${Number.isFinite(Number(pluginConfig.wanderFaceAngleDeg)) ? Math.round(Number(pluginConfig.wanderFaceAngleDeg)) : 45}">
               </div>
@@ -2946,8 +3121,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">头部追踪</div>
-              <div class="settings-title-description">头/颈会轻微跟随鼠标（幅度很小，兼容大部分 VRM）</div>
+              <div class="settings-title-text">澶撮儴杩借釜</div>
+              <div class="settings-title-description">澶?棰堜細杞诲井璺熼殢榧犳爣锛堝箙搴﹀緢灏忥紝鍏煎澶ч儴鍒?VRM锛</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_head_track" class="toggle-input" ${pluginConfig.headTrackEnabled ? "checked" : ""} />
@@ -2957,8 +3132,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">眼动追踪（简化版）</div>
-              <div class="settings-title-description">如果没有 VRM LookAt，就用更小幅度的头/颈动作来“假装看”</div>
+              <div class="settings-title-text">鐪煎姩杩借釜锛堢畝鍖栫増锛</div>
+              <div class="settings-title-description">濡傛灉娌℃湁 VRM LookAt锛屽氨鐢ㄦ洿灏忓箙搴︾殑澶?棰堝姩浣滄潵鈥滃亣瑁呯湅鈥</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_eye_track" class="toggle-input" ${pluginConfig.eyeTrackEnabled ? "checked" : ""} />
@@ -2968,8 +3143,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">空闲动作</div>
-              <div class="settings-title-description">一段时间没交互（默认 6~12 秒随机），会随机做一个小动作</div>
+              <div class="settings-title-text">绌洪棽鍔ㄤ綔</div>
+              <div class="settings-title-description">涓€娈垫椂闂存病浜や簰锛堥粯璁?6~12 绉掗殢鏈猴級锛屼細闅忔満鍋氫竴涓皬鍔ㄤ綔</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_idle_enabled" class="toggle-input" ${pluginConfig.idleEnabled ? "checked" : ""} />
@@ -2979,8 +3154,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">偶尔眨眼</div>
-              <div class="settings-title-description">无动作时也会随机眨眼（需要模型支持 blink 表情）</div>
+              <div class="settings-title-text">鍋跺皵鐪ㄧ溂</div>
+              <div class="settings-title-description">鏃犲姩浣滄椂涔熶細闅忔満鐪ㄧ溂锛堥渶瑕佹ā鍨嬫敮鎸?blink 琛ㄦ儏锛</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_blink_enabled" class="toggle-input" ${pluginConfig.blinkEnabled ? "checked" : ""} />
@@ -2990,8 +3165,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">拍拍头</div>
-              <div class="settings-title-description">点击头部附近会触发“摸头反应”+ 爱心粒子</div>
+              <div class="settings-title-text">鎷嶆媿澶</div>
+              <div class="settings-title-description">鐐瑰嚮澶撮儴闄勮繎浼氳Е鍙戔€滄懜澶村弽搴斺€? 鐖卞績绮掑瓙</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_pat_enabled" class="toggle-input" ${pluginConfig.patEnabled ? "checked" : ""} />
@@ -3001,8 +3176,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">手臂自然下垂</div>
-              <div class="settings-title-description">解决某些模型“平举/T Pose”站姿（不影响走路摆动/动作）</div>
+              <div class="settings-title-text">鎵嬭噦鑷劧涓嬪瀭</div>
+              <div class="settings-title-description">瑙ｅ喅鏌愪簺妯″瀷鈥滃钩涓?T Pose鈥濈珯濮匡紙涓嶅奖鍝嶈蛋璺憜鍔?鍔ㄤ綔锛</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_relax_arms" class="toggle-input" ${pluginConfig.relaxArmsEnabled ? "checked" : ""} />
@@ -3012,8 +3187,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">走路时也下压</div>
-              <div class="settings-title-description">开启后，“桌面走动/走路摆动”期间也会叠加手臂下垂（按上面参数）</div>
+              <div class="settings-title-text">璧拌矾鏃朵篃涓嬪帇</div>
+              <div class="settings-title-description">寮€鍚悗锛屸€滄闈㈣蛋鍔?璧拌矾鎽嗗姩鈥濇湡闂翠篃浼氬彔鍔犳墜鑷備笅鍨傦紙鎸変笂闈㈠弬鏁帮級</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_relax_arms_gait" class="toggle-input" ${pluginConfig.relaxArmsDuringWanderGait ? "checked" : ""} />
@@ -3023,13 +3198,13 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">下垂方式</div>
-              <div class="settings-title-description">不同模型骨骼轴向不一样；推荐用“自动”，不行再手动切</div>
+              <div class="settings-title-text">涓嬪瀭鏂瑰紡</div>
+              <div class="settings-title-description">涓嶅悓妯″瀷楠ㄩ杞村悜涓嶄竴鏍凤紱鎺ㄨ崘鐢ㄢ€滆嚜鍔ㄢ€濓紝涓嶈鍐嶆墜鍔ㄥ垏</div>
               <div class="marginTop5">
                 <select id="${MODULE_NAME}_relax_arms_mode" class="text_pole">
-                  <option value="auto" ${String(pluginConfig.relaxArmsMode||"auto")==="auto" ? "selected" : ""}>自动（推荐）</option>
-                  <option value="zroll" ${String(pluginConfig.relaxArmsMode||"auto")==="zroll" ? "selected" : ""}>Z 轴滚转（手动）</option>
-                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode||"auto")==="xpitch" ? "selected" : ""}>X 轴下压（手动）</option>
+                  <option value="auto" ${String(pluginConfig.relaxArmsMode||"auto")==="auto" ? "selected" : ""}>鑷姩锛堟帹鑽愶級</option>
+                  <option value="zroll" ${String(pluginConfig.relaxArmsMode||"auto")==="zroll" ? "selected" : ""}>Z 杞存粴杞紙鎵嬪姩锛?/option>
+                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode||"auto")==="xpitch" ? "selected" : ""}>X 杞翠笅鍘嬶紙鎵嬪姩锛?/option>
                 </select>
               </div>
             </div>
@@ -3037,7 +3212,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">下垂幅度：<span id="${MODULE_NAME}_relax_arms_down_val">${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}</span>°</div>
+              <div class="settings-title-text">涓嬪瀭骞呭害锛<span id="${MODULE_NAME}_relax_arms_down_val">${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}</span>掳</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_down" min="0" max="80" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsDownDeg)) ? Math.round(Number(pluginConfig.relaxArmsDownDeg)) : 55}">
               </div>
@@ -3046,7 +3221,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">手肘弯曲：<span id="${MODULE_NAME}_relax_arms_bend_val">${Number.isFinite(Number(pluginConfig.relaxArmsElbowBendDeg)) ? Math.round(Number(pluginConfig.relaxArmsElbowBendDeg)) : 16}</span>°</div>
+              <div class="settings-title-text">鎵嬭倶寮洸锛<span id="${MODULE_NAME}_relax_arms_bend_val">${Number.isFinite(Number(pluginConfig.relaxArmsElbowBendDeg)) ? Math.round(Number(pluginConfig.relaxArmsElbowBendDeg)) : 16}</span>掳</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_bend" min="0" max="35" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsElbowBendDeg)) ? Math.round(Number(pluginConfig.relaxArmsElbowBendDeg)) : 16}">
               </div>
@@ -3055,7 +3230,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">向前一点：<span id="${MODULE_NAME}_relax_arms_fwd_val">${Number.isFinite(Number(pluginConfig.relaxArmsForwardDeg)) ? Math.round(Number(pluginConfig.relaxArmsForwardDeg)) : 10}</span>°</div>
+              <div class="settings-title-text">鍚戝墠涓€鐐癸細<span id="${MODULE_NAME}_relax_arms_fwd_val">${Number.isFinite(Number(pluginConfig.relaxArmsForwardDeg)) ? Math.round(Number(pluginConfig.relaxArmsForwardDeg)) : 10}</span>掳</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_fwd" min="-25" max="35" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsForwardDeg)) ? Math.round(Number(pluginConfig.relaxArmsForwardDeg)) : 10}">
               </div>
@@ -3064,7 +3239,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">向外一点：<span id="${MODULE_NAME}_relax_arms_out_val">${Number.isFinite(Number(pluginConfig.relaxArmsOutDeg)) ? Math.round(Number(pluginConfig.relaxArmsOutDeg)) : 8}</span>°</div>
+              <div class="settings-title-text">鍚戝涓€鐐癸細<span id="${MODULE_NAME}_relax_arms_out_val">${Number.isFinite(Number(pluginConfig.relaxArmsOutDeg)) ? Math.round(Number(pluginConfig.relaxArmsOutDeg)) : 8}</span>掳</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_relax_arms_out" min="-25" max="25" step="1" value="${Number.isFinite(Number(pluginConfig.relaxArmsOutDeg)) ? Math.round(Number(pluginConfig.relaxArmsOutDeg)) : 8}">
               </div>
@@ -3073,8 +3248,8 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn">
-              <div class="settings-title-text">拖拽“被提起来”动作</div>
-              <div class="settings-title-description">拖动桌宠时手臂会有被拎起的摆动感</div>
+              <div class="settings-title-text">鎷栨嫿鈥滆鎻愯捣鏉モ€濆姩浣</div>
+              <div class="settings-title-description">鎷栧姩妗屽疇鏃舵墜鑷備細鏈夎鎷庤捣鐨勬憜鍔ㄦ劅</div>
             </div>
             <div class="toggle-switch">
               <input type="checkbox" id="${MODULE_NAME}_drag_pose" class="toggle-input" ${pluginConfig.dragHeldPoseEnabled ? "checked" : ""} />
@@ -3084,7 +3259,7 @@ function createSettingsInterface() {
 
           <div class="extension-content-item box-container">
             <div class="flex flexFlowColumn wide100p">
-              <div class="settings-title-text">拖拽动作强度：<span id="${MODULE_NAME}_drag_pose_intensity_val">${Number.isFinite(Number(pluginConfig.dragHeldPoseIntensity)) ? Number(pluginConfig.dragHeldPoseIntensity).toFixed(2) : "1.00"}</span>x</div>
+              <div class="settings-title-text">鎷栨嫿鍔ㄤ綔寮哄害锛<span id="${MODULE_NAME}_drag_pose_intensity_val">${Number.isFinite(Number(pluginConfig.dragHeldPoseIntensity)) ? Number(pluginConfig.dragHeldPoseIntensity).toFixed(2) : "1.00"}</span>x</div>
               <div class="range-row">
                 <input type="range" id="${MODULE_NAME}_drag_pose_intensity" min="0" max="2" step="0.05" value="${Number.isFinite(Number(pluginConfig.dragHeldPoseIntensity)) ? Number(pluginConfig.dragHeldPoseIntensity) : 1}">
               </div>
@@ -3488,6 +3663,7 @@ function bindCharacterChangeRefresh() {
         ctx.eventSource.on(ev, () => {
             removePetRadialMenu();
             removePetChatModal();
+            removePetEditorModal();
             refreshCurrentBindingText();
             loadVrmForCurrentCharacter().catch(() => {});
         });
@@ -3515,3 +3691,6 @@ function init() {
 }
 
 $(document).ready(() => init());
+
+
+
