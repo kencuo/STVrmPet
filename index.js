@@ -50,6 +50,38 @@ const DEFAULT_CONFIG = {
     dragLiftMaxTiltDeg: 10,
     // persisted per-user overlay position (in viewport px). If null, use bottom-right default.
     overlayPos: null,
+
+    // -----------------------------
+    // Desktop-pet interactions
+    // -----------------------------
+    headTrackEnabled: true,
+    // Max yaw/pitch for head/neck tracking (deg). Keep small for cross-model compatibility.
+    headTrackMaxYawDeg: 16,
+    headTrackMaxPitchDeg: 10,
+
+    // "Eye tracking": if the model doesn't support VRM lookAt, we approximate with tiny extra head/neck offsets.
+    eyeTrackEnabled: true,
+    eyeTrackMaxYawDeg: 6,
+    eyeTrackMaxPitchDeg: 4,
+
+    // Idle action scheduler: when no interactions for a while, play a random "cute" action.
+    idleEnabled: true,
+    idleMinMs: 6000,
+    idleMaxMs: 12000,
+    // Consider "relaxing" only when not wandering.
+    idleOnlyWhenNotWandering: true,
+
+    // Occasional blink even when idle.
+    blinkEnabled: true,
+    blinkMinMs: 3500,
+    blinkMaxMs: 6500,
+
+    // Head pat: click/tap near the head -> special action + hearts.
+    patEnabled: true,
+    patHeartCount: 7,
+    // Head hit radius ~= modelHeight * factor (tuned for typical VRM proportions).
+    patHeadRadiusFactor: 0.22,
+
     enableLogging: false,
 };
 
@@ -91,6 +123,30 @@ const vrmRenderState = {
         tiltZ: 0,
         targetTiltX: 0,
         targetTiltZ: 0,
+    },
+
+    // "Idle scheduler" + "blink scheduler" + interaction state.
+    interaction: {
+        lastAt: 0,
+    },
+    idle: {
+        nextAt: 0,
+    },
+    blink: {
+        nextAt: 0,
+        active: false,
+        t: 0,
+        duration: 0.18,
+    },
+
+    // Mouse tracking state (for head/eye follow).
+    pointer: {
+        bound: false,
+        ndcX: 0,
+        ndcY: 0,
+        smoothX: 0,
+        smoothY: 0,
+        lastMoveAt: 0,
     },
 };
 
@@ -216,6 +272,28 @@ function clamp(n, min, max) {
     return Math.max(min, Math.min(max, n));
 }
 
+function randRange(min, max) {
+    const a = Number(min);
+    const b = Number(max);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+    if (a === b) return a;
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    return lo + Math.random() * (hi - lo);
+}
+
+function markInteraction() {
+    const now = performance.now();
+    vrmRenderState.interaction.lastAt = now;
+    // Push the next idle action further out so it doesn't trigger right after user input.
+    vrmRenderState.idle.nextAt = now + randRange(pluginConfig.idleMinMs, pluginConfig.idleMaxMs);
+}
+
+function scheduleNextBlink(now) {
+    vrmRenderState.blink.nextAt =
+        now + randRange(pluginConfig.blinkMinMs, pluginConfig.blinkMaxMs);
+}
+
 function setHint(text) {
     const el = document.getElementById("vrm-pet-hint");
     if (!el) return;
@@ -238,6 +316,7 @@ function bindOverlayDrag(overlayEl) {
 
     shell.addEventListener("pointerdown", (e) => {
         if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+        markInteraction();
         dragging = false;
         captured = false;
         pointerId = e.pointerId;
@@ -262,6 +341,7 @@ function bindOverlayDrag(overlayEl) {
                 captured = true;
             } catch (_) {}
             e.preventDefault();
+            markInteraction();
 
             // Start "pick up" effect once we're actually dragging.
             if (pluginConfig.dragLiftEnabled) {
@@ -344,6 +424,197 @@ function stopRenderLoop() {
             vrmRenderState.resizeObserver.disconnect();
         } catch (_) {}
         vrmRenderState.resizeObserver = null;
+    }
+}
+
+function bindGlobalPointerTracking() {
+    if (vrmRenderState.pointer.bound) return;
+    vrmRenderState.pointer.bound = true;
+
+    // Track pointer anywhere in the app window (not just inside the overlay).
+    window.addEventListener(
+        "pointermove",
+        (e) => {
+            const w = Math.max(1, window.innerWidth);
+            const h = Math.max(1, window.innerHeight);
+            // Normalized device coords (-1..1). y is up.
+            vrmRenderState.pointer.ndcX = (e.clientX / w) * 2 - 1;
+            vrmRenderState.pointer.ndcY = 1 - (e.clientY / h) * 2;
+            vrmRenderState.pointer.lastMoveAt = performance.now();
+        },
+        { passive: true },
+    );
+}
+
+function applyLookTracking(delta) {
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    if (!pluginConfig.headTrackEnabled && !pluginConfig.eyeTrackEnabled) return;
+
+    if (!vrm.scene.userData.__vrmPetBones) initPetActionRig(vrm);
+    const bones = vrm.scene.userData.__vrmPetBones ?? null;
+    const rest = vrm.scene.userData.__vrmPetBoneRest ?? null;
+    if (!bones || !rest) return;
+
+    const now = performance.now();
+
+    // Prevent drift: if nothing else reset the rig this frame (no action, no gait),
+    // our quaternion.multiply() would accumulate forever.
+    const gaitActive =
+        !!pluginConfig.wanderEnabled &&
+        !!pluginConfig.wanderGaitEnabled &&
+        now >= (vrmRenderState.wander.pausedUntil || 0);
+    if (!vrmRenderState.petAction.active && !gaitActive) {
+        resetPetRigToRest(vrm);
+    }
+
+    const recentlyMoved = now - (vrmRenderState.pointer.lastMoveAt || 0) < 1800;
+
+    const targetX = recentlyMoved ? clamp(vrmRenderState.pointer.ndcX || 0, -1, 1) : 0;
+    const targetY = recentlyMoved ? clamp(vrmRenderState.pointer.ndcY || 0, -1, 1) : 0;
+
+    // Smoothly approach target to reduce jitter.
+    const k = 10;
+    const a = 1 - Math.exp(-k * Math.max(0, delta));
+    vrmRenderState.pointer.smoothX += (targetX - vrmRenderState.pointer.smoothX) * a;
+    vrmRenderState.pointer.smoothY += (targetY - vrmRenderState.pointer.smoothY) * a;
+
+    // Clamp to small angles; different models have different axes, so keep it subtle.
+    const headYawMax = THREE.MathUtils.degToRad(
+        clamp(Number(pluginConfig.headTrackMaxYawDeg) || 16, 0, 35),
+    );
+    const headPitchMax = THREE.MathUtils.degToRad(
+        clamp(Number(pluginConfig.headTrackMaxPitchDeg) || 10, 0, 25),
+    );
+
+    const eyeYawMax = THREE.MathUtils.degToRad(
+        clamp(Number(pluginConfig.eyeTrackMaxYawDeg) || 6, 0, 18),
+    );
+    const eyePitchMax = THREE.MathUtils.degToRad(
+        clamp(Number(pluginConfig.eyeTrackMaxPitchDeg) || 4, 0, 12),
+    );
+
+    // Map mouse -> yaw/pitch (note: yaw sign feels more natural with -X).
+    const sx = vrmRenderState.pointer.smoothX || 0;
+    const sy = vrmRenderState.pointer.smoothY || 0;
+    const baseYaw = -sx * headYawMax;
+    const basePitch = sy * headPitchMax;
+
+    const extraYaw = pluginConfig.eyeTrackEnabled ? -sx * eyeYawMax : 0;
+    const extraPitch = pluginConfig.eyeTrackEnabled ? sy * eyePitchMax : 0;
+
+    const neck = bones.neck;
+    const head = bones.head;
+    const spine = bones.spine;
+    const chest = bones.chest ?? bones.upperChest;
+
+    const qTmp = new THREE.Quaternion();
+    const eTmp = new THREE.Euler();
+
+    // Apply small offsets on top of whatever pose was computed this frame (idle action / gait / etc).
+    // Because those systems reset from rest every frame, this won't accumulate.
+    if (pluginConfig.headTrackEnabled) {
+        if (spine && rest.spine) {
+            eTmp.set(basePitch * 0.10, baseYaw * 0.10, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            spine.quaternion.multiply(qTmp);
+        }
+        if (chest) {
+            eTmp.set(basePitch * 0.12, baseYaw * 0.12, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            chest.quaternion.multiply(qTmp);
+        }
+        if (neck) {
+            eTmp.set(basePitch * 0.38, baseYaw * 0.38, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            neck.quaternion.multiply(qTmp);
+        }
+        if (head) {
+            eTmp.set(basePitch * 0.52 + extraPitch, baseYaw * 0.52 + extraYaw, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            head.quaternion.multiply(qTmp);
+        }
+    } else if (pluginConfig.eyeTrackEnabled) {
+        // Eye-only mode: tiny head/neck offsets.
+        if (neck) {
+            eTmp.set(extraPitch * 0.45, extraYaw * 0.45, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            neck.quaternion.multiply(qTmp);
+        }
+        if (head) {
+            eTmp.set(extraPitch * 0.55, extraYaw * 0.55, 0, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            head.quaternion.multiply(qTmp);
+        }
+    }
+}
+
+function updateIdleScheduler() {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    if (!pluginConfig.idleEnabled) return;
+    if (!vrmRenderState.currentVrm) return;
+    if (vrmRenderState.petAction.active) return;
+    if (pluginConfig.idleOnlyWhenNotWandering && pluginConfig.wanderEnabled) return;
+    if (vrmRenderState.dragLift.active) return;
+
+    const now = performance.now();
+    const last = vrmRenderState.interaction.lastAt || 0;
+
+    // Ensure we have a schedule.
+    if (!vrmRenderState.idle.nextAt) {
+        vrmRenderState.idle.nextAt = now + randRange(pluginConfig.idleMinMs, pluginConfig.idleMaxMs);
+        return;
+    }
+
+    // If the user recently interacted, don't run idle actions.
+    if (now - last < Math.max(0, Number(pluginConfig.idleMinMs) || 6000) * 0.85) return;
+
+    if (now >= vrmRenderState.idle.nextAt) {
+        playRandomPetAction("idle");
+        // Treat idle action as an "interaction" so we don't spam actions back-to-back.
+        markInteraction();
+    }
+}
+
+function updateBlink(delta) {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    if (!pluginConfig.blinkEnabled) return;
+    const vrm = vrmRenderState.currentVrm;
+    if (!vrm) return;
+
+    const em = vrm.expressionManager;
+    if (!em?.setValue) return;
+
+    const now = performance.now();
+    if (!vrmRenderState.blink.nextAt) scheduleNextBlink(now);
+
+    // Avoid starting a blink mid-action; actions already may blink near the end.
+    if (!vrmRenderState.blink.active && vrmRenderState.petAction.active) return;
+
+    if (!vrmRenderState.blink.active && now >= vrmRenderState.blink.nextAt) {
+        vrmRenderState.blink.active = true;
+        vrmRenderState.blink.t = 0;
+    }
+
+    if (!vrmRenderState.blink.active) return;
+
+    vrmRenderState.blink.t += Math.max(0, delta);
+    const d = Math.max(0.06, Number(vrmRenderState.blink.duration) || 0.18);
+    const p = clamp01(vrmRenderState.blink.t / d);
+    // Close then open (triangular pulse).
+    const v = p < 0.5 ? p * 2 : (1 - p) * 2;
+    try {
+        em.setValue("blink", clamp01(v));
+    } catch (_) {}
+
+    if (p >= 1) {
+        vrmRenderState.blink.active = false;
+        vrmRenderState.blink.t = 0;
+        try {
+            em.setValue("blink", 0);
+        } catch (_) {}
+        scheduleNextBlink(now);
     }
 }
 
@@ -911,11 +1182,14 @@ function startRenderLoop() {
             } catch (_) {}
         }
         updatePetAction(delta);
+        updateIdleScheduler();
         updateWander(delta);
         updateWanderGait(delta);
+        applyLookTracking(delta);
         updateWanderFacing(delta);
         updateDragLift(delta);
         applyRootPose();
+        updateBlink(delta);
         vrmRenderState.renderer.render(
             vrmRenderState.scene,
             vrmRenderState.camera,
@@ -1013,6 +1287,7 @@ function playPetAction(actionName) {
     if (actionName === "wave") duration = 1.0;
     if (actionName === "tilt") duration = 0.9;
     if (actionName === "cheer") duration = 0.9;
+    if (actionName === "pat") duration = 0.75;
 
     vrmRenderState.petAction.active = actionName;
     vrmRenderState.petAction.t = 0;
@@ -1025,6 +1300,8 @@ function playRandomPetAction(kind = "gen") {
     const pool =
         kind === "tap"
             ? ["tap", "nod", "wave", "tilt", "cheer"]
+            : kind === "idle"
+              ? ["nod", "bounce", "tilt", "wave", "cheer"]
             : ["nod", "bounce", "wave", "tilt"];
     const idx = Math.floor(Math.random() * pool.length);
     playPetAction(pool[idx]);
@@ -1192,6 +1469,31 @@ function updatePetAction(delta) {
             qTmp.setFromEuler(eTmp);
             rLA.quaternion.multiply(qTmp);
         }
+    } else if (a === "pat") {
+        // Head pat reaction: a quick happy shake + tiny bounce.
+        if (hips && rest.hips) {
+            const amp = 0.05;
+            hips.position.y =
+                rest.hips.position.y +
+                amp * Math.sin(Math.PI * p) * (0.45 + 0.55 * (1 - p));
+        }
+        if (neck) {
+            const yaw = THREE.MathUtils.degToRad(10);
+            const roll = THREE.MathUtils.degToRad(10);
+            const phase = Math.sin(p * Math.PI * 2 * 3);
+            eTmp.set(0, yaw * phase * (0.4 + 0.6 * (1 - p)), roll * Math.sin(p * Math.PI * 2) * 0.35, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            neck.quaternion.multiply(qTmp);
+        }
+        if (head) {
+            const yaw = THREE.MathUtils.degToRad(18);
+            const pitch = THREE.MathUtils.degToRad(8);
+            const roll = THREE.MathUtils.degToRad(14);
+            const phase = Math.sin(p * Math.PI * 2 * 3);
+            eTmp.set(-pitch * Math.sin(Math.PI * p) * 0.7, yaw * phase, roll * Math.sin(p * Math.PI * 2) * 0.6, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            head.quaternion.multiply(qTmp);
+        }
     }
 
     // Tiny blink near the end (if expressions exist).
@@ -1239,13 +1541,41 @@ function bindStageInteractions(overlayEl) {
         if (dt > 600 || Math.hypot(dx, dy) > 6) return;
         if (!vrmRenderState.currentVrm) return;
 
+        markInteraction();
+
         const rect = canvas.getBoundingClientRect();
         const x = (e.clientX - rect.left) / Math.max(1, rect.width);
         const y = (e.clientY - rect.top) / Math.max(1, rect.height);
         ndc.set(x * 2 - 1, -(y * 2 - 1));
         raycaster.setFromCamera(ndc, vrmRenderState.camera);
         const hits = raycaster.intersectObject(vrmRenderState.currentVrm.scene, true);
-        if (hits && hits.length > 0) playRandomPetAction("tap");
+        if (!hits || hits.length === 0) return;
+
+        // Head pat: if click is near head bone, play a special action + hearts.
+        if (pluginConfig.patEnabled) {
+            const vrm = vrmRenderState.currentVrm;
+            if (vrm && !vrm.scene.userData.__vrmPetBones) initPetActionRig(vrm);
+            const bones = vrm?.scene?.userData?.__vrmPetBones ?? null;
+            const headBone = bones?.head ?? null;
+            if (headBone) {
+                const headPos = new THREE.Vector3();
+                headBone.getWorldPosition(headPos);
+                const hitPos = hits[0].point;
+                const sizeY =
+                    vrmRenderState.currentVrm?.scene?.userData?.__vrmPetBBoxSizeY ??
+                    1.6;
+                const fRaw = Number(pluginConfig.patHeadRadiusFactor);
+                const f = Number.isFinite(fRaw) ? clamp(fRaw, 0.08, 0.4) : 0.22;
+                const threshold = Math.max(0.05, Math.max(0.1, sizeY) * f);
+                if (headPos.distanceTo(hitPos) <= threshold) {
+                    playPetAction("pat");
+                    spawnHeartsAtClientPoint(e.clientX, e.clientY);
+                    return;
+                }
+            }
+        }
+
+        playRandomPetAction("tap");
     });
 }
 
@@ -1258,8 +1588,62 @@ function bindActionTriggers() {
     ctx.eventSource.on(ctx.eventTypes.GENERATION_ENDED, () => {
         if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
         if (!vrmRenderState.currentVrm) return;
+        markInteraction();
         playRandomPetAction("gen");
     });
+}
+
+function ensureFxLayer() {
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    if (!overlayEl) return null;
+    const shell = overlayEl.querySelector(".vrm-pet-shell");
+    if (!shell) return null;
+    let fx = shell.querySelector(".vrm-pet-fx");
+    if (!fx) {
+        fx = document.createElement("div");
+        fx.className = "vrm-pet-fx";
+        shell.appendChild(fx);
+    }
+    return fx;
+}
+
+function spawnHeartsAtClientPoint(clientX, clientY) {
+    try {
+        const fx = ensureFxLayer();
+        if (!fx) return;
+        const overlayEl = document.getElementById("vrm-pet-overlay");
+        if (!overlayEl) return;
+
+        const rect = overlayEl.getBoundingClientRect();
+        const x0 = clientX - rect.left;
+        const y0 = clientY - rect.top;
+
+        const count = clamp(parseInt(String(pluginConfig.patHeartCount ?? 7), 10) || 7, 1, 20);
+        for (let i = 0; i < count; i++) {
+            const el = document.createElement("div");
+            el.className = "vrm-pet-heart";
+            // Randomize spawn around click point.
+            const dx = randRange(-10, 10);
+            const dy = randRange(-6, 8);
+            const x = clamp(x0 + dx, 0, rect.width);
+            const y = clamp(y0 + dy, 0, rect.height);
+            el.style.left = `${x}px`;
+            el.style.top = `${y}px`;
+            el.style.setProperty("--vrmPetDx", `${randRange(-14, 14).toFixed(1)}px`);
+            el.style.setProperty("--vrmPetLift", `${randRange(28, 56).toFixed(1)}px`);
+            el.style.setProperty("--vrmPetDur", `${randRange(520, 900).toFixed(0)}ms`);
+            fx.appendChild(el);
+            el.addEventListener(
+                "animationend",
+                () => {
+                    try {
+                        el.remove();
+                    } catch (_) {}
+                },
+                { once: true },
+            );
+        }
+    } catch (_) {}
 }
 
 function fitCameraToObject(object3d) {
@@ -1645,6 +2029,61 @@ function createSettingsInterface() {
             </div>
           </div>
 
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">头部追踪</div>
+              <div class="settings-title-description">头/颈会轻微跟随鼠标（幅度很小，兼容大部分 VRM）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_head_track" class="toggle-input" ${pluginConfig.headTrackEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_head_track" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">眼动追踪（简化版）</div>
+              <div class="settings-title-description">如果没有 VRM LookAt，就用更小幅度的头/颈动作来“假装看”</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_eye_track" class="toggle-input" ${pluginConfig.eyeTrackEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_eye_track" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">空闲动作</div>
+              <div class="settings-title-description">一段时间没交互（默认 6~12 秒随机），会随机做一个小动作</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_idle_enabled" class="toggle-input" ${pluginConfig.idleEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_idle_enabled" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">偶尔眨眼</div>
+              <div class="settings-title-description">无动作时也会随机眨眼（需要模型支持 blink 表情）</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_blink_enabled" class="toggle-input" ${pluginConfig.blinkEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_blink_enabled" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
+          <div class="extension-content-item box-container">
+            <div class="flex flexFlowColumn">
+              <div class="settings-title-text">拍拍头</div>
+              <div class="settings-title-description">点击头部附近会触发“摸头反应”+ 爱心粒子</div>
+            </div>
+            <div class="toggle-switch">
+              <input type="checkbox" id="${MODULE_NAME}_pat_enabled" class="toggle-input" ${pluginConfig.patEnabled ? "checked" : ""} />
+              <label for="${MODULE_NAME}_pat_enabled" class="toggle-label"><span class="toggle-handle"></span></label>
+            </div>
+          </div>
+
         </div>
       </div>
     </div>
@@ -1768,6 +2207,35 @@ function bindSettingsEvents() {
                 }
                 applyRootPose();
             }
+        }
+
+        if (t.id === `${MODULE_NAME}_head_track`) {
+            pluginConfig.headTrackEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
+        }
+        if (t.id === `${MODULE_NAME}_eye_track`) {
+            pluginConfig.eyeTrackEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
+        }
+        if (t.id === `${MODULE_NAME}_idle_enabled`) {
+            pluginConfig.idleEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            // Reset idle schedule immediately.
+            markInteraction();
+            saveSettings();
+        }
+        if (t.id === `${MODULE_NAME}_blink_enabled`) {
+            pluginConfig.blinkEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            // Restart schedule so it feels responsive.
+            const now = performance.now();
+            vrmRenderState.blink.active = false;
+            vrmRenderState.blink.t = 0;
+            vrmRenderState.blink.nextAt = 0;
+            if (pluginConfig.blinkEnabled) scheduleNextBlink(now);
+            saveSettings();
+        }
+        if (t.id === `${MODULE_NAME}_pat_enabled`) {
+            pluginConfig.patEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            saveSettings();
         }
 
         // Auto-upload after file picked (button click opens the picker).
@@ -1964,6 +2432,8 @@ function init() {
     createSettingsInterface();
     refreshSelectedFileText();
     ensureOverlay();
+    bindGlobalPointerTracking();
+    markInteraction();
     bindCharacterChangeRefresh();
     bindActionTriggers();
     loadVrmForCurrentCharacter().catch(() => {});
