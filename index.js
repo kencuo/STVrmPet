@@ -211,6 +211,9 @@ const vrmRenderState = {
         longPressTimer: null,
         longPressTriggered: false,
         longPressStart: null,
+        bubbleToken: 0,
+        bubbleHideTimer: null,
+        bubbleRemoveTimer: null,
     },
 };
 
@@ -352,7 +355,8 @@ function markInteraction() {
     const now = performance.now();
     vrmRenderState.interaction.lastAt = now;
     // Push the next idle action further out so it doesn't trigger right after user input.
-    vrmRenderState.idle.nextAt = now + randRange(pluginConfig.idleMinMs, pluginConfig.idleMaxMs);
+    vrmRenderState.idle.nextAt =
+        now + randRange(pluginConfig.idleMinMs, pluginConfig.idleMaxMs);
 }
 
 function scheduleNextBlink(now) {
@@ -456,7 +460,9 @@ function bindOverlayDrag(overlayEl) {
             const factor = Number(pluginConfig.dragLiftHeightFactor);
             const liftFactor = Number.isFinite(factor) ? factor : 0.08;
             vrmRenderState.dragLift.targetLift =
-                Math.max(0, sizeY) * clamp(liftFactor, 0, 0.25) * (0.35 + 0.65 * mag);
+                Math.max(0, sizeY) *
+                clamp(liftFactor, 0, 0.25) *
+                (0.35 + 0.65 * mag);
 
             const maxTiltDeg = Number(pluginConfig.dragLiftMaxTiltDeg);
             const deg = Number.isFinite(maxTiltDeg) ? maxTiltDeg : 10;
@@ -534,8 +540,14 @@ function insertTextIntoSendTextarea(text) {
 
     // Insert at cursor if possible, else append.
     try {
-        const start = typeof el.selectionStart === "number" ? el.selectionStart : el.value.length;
-        const end = typeof el.selectionEnd === "number" ? el.selectionEnd : el.value.length;
+        const start =
+            typeof el.selectionStart === "number"
+                ? el.selectionStart
+                : el.value.length;
+        const end =
+            typeof el.selectionEnd === "number"
+                ? el.selectionEnd
+                : el.value.length;
         const before = el.value.slice(0, start);
         const after = el.value.slice(end);
         const needsNewline =
@@ -666,6 +678,25 @@ function removePetChatModal() {
     if (vrmRenderState.ui) vrmRenderState.ui.chatOpen = false;
 }
 
+function removePetSpeechBubble() {
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    const el = overlayEl?.querySelector?.(".vrm-pet-speech-bubble") ?? null;
+    try {
+        el?.remove?.();
+    } catch (_) {}
+    if (vrmRenderState.ui) {
+        vrmRenderState.ui.bubbleToken = (vrmRenderState.ui.bubbleToken || 0) + 1;
+        if (vrmRenderState.ui.bubbleHideTimer) {
+            clearTimeout(vrmRenderState.ui.bubbleHideTimer);
+            vrmRenderState.ui.bubbleHideTimer = null;
+        }
+        if (vrmRenderState.ui.bubbleRemoveTimer) {
+            clearTimeout(vrmRenderState.ui.bubbleRemoveTimer);
+            vrmRenderState.ui.bubbleRemoveTimer = null;
+        }
+    }
+}
+
 function removePetEditorModal() {
     const overlayEl = document.getElementById("vrm-pet-overlay");
     const el = overlayEl?.querySelector?.(".vrm-pet-editor-overlay") ?? null;
@@ -682,6 +713,79 @@ function removePetEmotePanel() {
         el?.remove?.();
     } catch (_) {}
     if (vrmRenderState.ui) vrmRenderState.ui.emoteOpen = false;
+}
+
+function positionPetSpeechBubbleNearOverlay(bubbleEl) {
+    try {
+        const overlayEl = document.getElementById("vrm-pet-overlay");
+        if (!overlayEl || !bubbleEl) return;
+
+        const petRect = overlayEl.getBoundingClientRect();
+        const r = bubbleEl.getBoundingClientRect();
+
+        const gap = 10;
+        const margin = 12;
+
+        const leftX = petRect.left - gap - r.width;
+        const rightX = petRect.right + gap;
+        const canLeft = leftX >= margin;
+        const canRight = rightX + r.width <= window.innerWidth - margin;
+
+        // Prefer to the side of the pet so the model remains visible.
+        const side = canRight ? "right" : canLeft ? "left" : "left";
+        let x = side === "right" ? rightX : leftX;
+        let y = petRect.top + 14;
+
+        x = clamp(x, margin, Math.max(margin, window.innerWidth - r.width - margin));
+        y = clamp(y, margin, Math.max(margin, window.innerHeight - r.height - margin));
+
+        bubbleEl.dataset.side = side;
+        bubbleEl.style.position = "fixed";
+        bubbleEl.style.left = `${Math.round(x)}px`;
+        bubbleEl.style.top = `${Math.round(y)}px`;
+    } catch (_) {}
+}
+
+function showPetSpeechBubble(text, opts = {}) {
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    const overlayEl = document.getElementById("vrm-pet-overlay");
+    if (!overlayEl) return;
+    if (!vrmRenderState.ui) return;
+
+    const s = stripThinkTags(String(text ?? ""));
+    if (!s) return;
+
+    removePetSpeechBubble();
+
+    const bubble = document.createElement("div");
+    bubble.className = "vrm-pet-speech-bubble";
+    bubble.textContent = s;
+    overlayEl.appendChild(bubble);
+
+    const durationMsRaw = Number(opts?.durationMs);
+    const durationMs = Number.isFinite(durationMsRaw) ? durationMsRaw : 5000;
+
+    const token =
+        (vrmRenderState.ui.bubbleToken = (vrmRenderState.ui.bubbleToken || 0) + 1);
+
+    setTimeout(() => {
+        if (vrmRenderState.ui && token !== vrmRenderState.ui.bubbleToken) return;
+        positionPetSpeechBubbleNearOverlay(bubble);
+    }, 0);
+
+    vrmRenderState.ui.bubbleHideTimer = setTimeout(() => {
+        if (!vrmRenderState.ui || token !== vrmRenderState.ui.bubbleToken) return;
+        try {
+            bubble.classList.add("vrm-pet-hide");
+        } catch (_) {}
+        if (!vrmRenderState.ui) return;
+        vrmRenderState.ui.bubbleRemoveTimer = setTimeout(() => {
+            if (!vrmRenderState.ui || token !== vrmRenderState.ui.bubbleToken) return;
+            try {
+                bubble.remove();
+            } catch (_) {}
+        }, 220);
+    }, clamp(durationMs, 1200, 20000));
 }
 
 function showPetEmotePanel() {
@@ -798,8 +902,16 @@ function positionPetModalPanelNearOverlay(panelEl) {
             y = petRect.top - gap - panelRect.height;
         }
 
-        x = clamp(x, margin, Math.max(margin, window.innerWidth - panelRect.width - margin));
-        y = clamp(y, margin, Math.max(margin, window.innerHeight - panelRect.height - margin));
+        x = clamp(
+            x,
+            margin,
+            Math.max(margin, window.innerWidth - panelRect.width - margin),
+        );
+        y = clamp(
+            y,
+            margin,
+            Math.max(margin, window.innerHeight - panelRect.height - margin),
+        );
 
         panelEl.style.position = "fixed";
         panelEl.style.left = `${Math.round(x)}px`;
@@ -951,7 +1063,9 @@ function renderPetChatMessages(container, messages, nameUser, namePet) {
         const m = arr[i];
         const row = document.createElement("div");
         row.className =
-            m.role === "assistant" ? "vrm-pet-chat-msg assistant" : "vrm-pet-chat-msg user";
+            m.role === "assistant"
+                ? "vrm-pet-chat-msg assistant"
+                : "vrm-pet-chat-msg user";
 
         const who = document.createElement("div");
         who.className = "vrm-pet-chat-who";
@@ -1160,7 +1274,9 @@ function showPetChatModal() {
             const lines = [];
             for (const m of tail) {
                 const who = m.role === "assistant" ? namePet : nameUser;
-                const mes = String(m.text ?? "").replace(/\s+/g, " ").trim();
+                const mes = String(m.text ?? "")
+                    .replace(/\s+/g, " ")
+                    .trim();
                 if (!mes) continue;
                 lines.push(`${who}: ${mes}`);
             }
@@ -1183,6 +1299,7 @@ function showPetChatModal() {
             await savePetChatMessagesForCurrentCharacter(msgs);
             refresh();
             triggerPetEmotionFromText(out);
+            showPetSpeechBubble(out, { durationMs: 5200 });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             toastr?.error?.(msg, "VRM Pet");
@@ -1345,7 +1462,8 @@ function showPetRadialMenu(clientX, clientY) {
             }
             if (action === "ai") {
                 const ctx = getContext();
-                if (!ctx?.generateRaw) throw new Error("generateRaw unavailable");
+                if (!ctx?.generateRaw)
+                    throw new Error("generateRaw unavailable");
                 const persona = getPetPersonaForCurrentCharacter();
                 const extra = getPetSystemPromptExtraForCurrentCharacter();
 
@@ -1422,7 +1540,10 @@ function showPetRadialMenu(clientX, clientY) {
             const petRect = overlayEl.getBoundingClientRect();
             const gap = 12;
             const maxX = Math.max(margin, window.innerWidth - r.width - margin);
-            const maxY = Math.max(margin, window.innerHeight - r.height - margin);
+            const maxY = Math.max(
+                margin,
+                window.innerHeight - r.height - margin,
+            );
 
             // Prefer staying beside the pet when invoked from the pet area; otherwise anchor near the pointer.
             const invokedFromPet =
@@ -1497,14 +1618,20 @@ function applyLookTracking(delta) {
     const now = performance.now();
     const recentlyMoved = now - (vrmRenderState.pointer.lastMoveAt || 0) < 1800;
 
-    const targetX = recentlyMoved ? clamp(vrmRenderState.pointer.ndcX || 0, -1, 1) : 0;
-    const targetY = recentlyMoved ? clamp(vrmRenderState.pointer.ndcY || 0, -1, 1) : 0;
+    const targetX = recentlyMoved
+        ? clamp(vrmRenderState.pointer.ndcX || 0, -1, 1)
+        : 0;
+    const targetY = recentlyMoved
+        ? clamp(vrmRenderState.pointer.ndcY || 0, -1, 1)
+        : 0;
 
     // Smoothly approach target to reduce jitter.
     const k = 10;
     const a = 1 - Math.exp(-k * Math.max(0, delta));
-    vrmRenderState.pointer.smoothX += (targetX - vrmRenderState.pointer.smoothX) * a;
-    vrmRenderState.pointer.smoothY += (targetY - vrmRenderState.pointer.smoothY) * a;
+    vrmRenderState.pointer.smoothX +=
+        (targetX - vrmRenderState.pointer.smoothX) * a;
+    vrmRenderState.pointer.smoothY +=
+        (targetY - vrmRenderState.pointer.smoothY) * a;
 
     // Clamp to small angles; different models have different axes, so keep it subtle.
     const headYawMax = THREE.MathUtils.degToRad(
@@ -1542,7 +1669,7 @@ function applyLookTracking(delta) {
     // Because those systems reset from rest every frame, this won't accumulate.
     if (pluginConfig.headTrackEnabled) {
         if (spine && rest.spine) {
-            eTmp.set(basePitch * 0.10, baseYaw * 0.10, 0, "XYZ");
+            eTmp.set(basePitch * 0.1, baseYaw * 0.1, 0, "XYZ");
             qTmp.setFromEuler(eTmp);
             spine.quaternion.multiply(qTmp);
         }
@@ -1557,7 +1684,12 @@ function applyLookTracking(delta) {
             neck.quaternion.multiply(qTmp);
         }
         if (head) {
-            eTmp.set(basePitch * 0.52 + extraPitch, baseYaw * 0.52 + extraYaw, 0, "XYZ");
+            eTmp.set(
+                basePitch * 0.52 + extraPitch,
+                baseYaw * 0.52 + extraYaw,
+                0,
+                "XYZ",
+            );
             qTmp.setFromEuler(eTmp);
             head.quaternion.multiply(qTmp);
         }
@@ -1581,7 +1713,8 @@ function updateIdleScheduler() {
     if (!pluginConfig.idleEnabled) return;
     if (!vrmRenderState.currentVrm) return;
     if (vrmRenderState.petAction.active) return;
-    if (pluginConfig.idleOnlyWhenNotWandering && pluginConfig.wanderEnabled) return;
+    if (pluginConfig.idleOnlyWhenNotWandering && pluginConfig.wanderEnabled)
+        return;
     if (vrmRenderState.dragLift.active) return;
 
     const now = performance.now();
@@ -1589,12 +1722,14 @@ function updateIdleScheduler() {
 
     // Ensure we have a schedule.
     if (!vrmRenderState.idle.nextAt) {
-        vrmRenderState.idle.nextAt = now + randRange(pluginConfig.idleMinMs, pluginConfig.idleMaxMs);
+        vrmRenderState.idle.nextAt =
+            now + randRange(pluginConfig.idleMinMs, pluginConfig.idleMaxMs);
         return;
     }
 
     // If the user recently interacted, don't run idle actions.
-    if (now - last < Math.max(0, Number(pluginConfig.idleMinMs) || 6000) * 0.85) return;
+    if (now - last < Math.max(0, Number(pluginConfig.idleMinMs) || 6000) * 0.85)
+        return;
 
     if (now >= vrmRenderState.idle.nextAt) {
         playRandomPetAction("idle");
@@ -1654,16 +1789,23 @@ function updateWander(delta) {
     const overlayEl = document.getElementById("vrm-pet-overlay");
     if (!overlayEl) return;
 
-    const w = overlayEl.offsetWidth || (Number(pluginConfig.overlayWidth) || 240);
-    const h = overlayEl.offsetHeight || (Number(pluginConfig.overlayHeight) || 240);
+    const w = overlayEl.offsetWidth || Number(pluginConfig.overlayWidth) || 240;
+    const h =
+        overlayEl.offsetHeight || Number(pluginConfig.overlayHeight) || 240;
 
     // Keep it inside viewport with a small margin.
     const margin = 14;
     const maxX = Math.max(margin, window.innerWidth - w - margin);
     const maxY = Math.max(margin, window.innerHeight - h - margin);
 
-    let x = typeof pluginConfig.overlayPos?.x === "number" ? pluginConfig.overlayPos.x : maxX;
-    let y = typeof pluginConfig.overlayPos?.y === "number" ? pluginConfig.overlayPos.y : maxY;
+    let x =
+        typeof pluginConfig.overlayPos?.x === "number"
+            ? pluginConfig.overlayPos.x
+            : maxX;
+    let y =
+        typeof pluginConfig.overlayPos?.y === "number"
+            ? pluginConfig.overlayPos.y
+            : maxY;
 
     const speed = Math.max(10, Number(pluginConfig.wanderSpeed) || 80);
     const dx = (vrmRenderState.wander.vx || 1) * speed * delta;
@@ -1682,7 +1824,10 @@ function updateWander(delta) {
     }
 
     // Default: keep near bottom if user never set a y.
-    if (pluginConfig.overlayPos == null || typeof pluginConfig.overlayPos?.y !== "number") {
+    if (
+        pluginConfig.overlayPos == null ||
+        typeof pluginConfig.overlayPos?.y !== "number"
+    ) {
         y = maxY;
     } else {
         if (y <= margin) {
@@ -1717,7 +1862,9 @@ function updateWanderGait(delta) {
     if (!bones || !rest) return;
 
     const intensityRaw = Number(pluginConfig.wanderGaitIntensity);
-    const intensity = Number.isFinite(intensityRaw) ? Math.max(0, Math.min(2, intensityRaw)) : 1.0;
+    const intensity = Number.isFinite(intensityRaw)
+        ? Math.max(0, Math.min(2, intensityRaw))
+        : 1.0;
     if (intensity <= 0) return;
 
     // Advance gait phase. Faster wander -> slightly faster gait.
@@ -1823,7 +1970,7 @@ function updateWanderGait(delta) {
     // Knee bend: bend more when the leg is moving back (approx) + always a bit for "bounce".
     const knee = THREE.MathUtils.degToRad(26) * intensity;
     const kneeL = Math.max(0, -s); // left bends when left leg goes back
-    const kneeR = Math.max(0, s);  // right bends when right leg goes back
+    const kneeR = Math.max(0, s); // right bends when right leg goes back
     if (lLL) {
         eTmp.set(-knee * (0.15 + 0.85 * kneeL), 0, 0, "XYZ");
         qTmp.setFromEuler(eTmp);
@@ -1868,14 +2015,17 @@ function updateWanderFacing(delta) {
         : 45;
 
     // When wandering: face 45deg in movement direction. Otherwise: face front (0deg).
-    const targetYaw = faceEnabled && activelyWandering
-        ? THREE.MathUtils.degToRad(angleDeg) * ((vrmRenderState.wander.vx || 1) >= 0 ? 1 : -1)
-        : 0;
+    const targetYaw =
+        faceEnabled && activelyWandering
+            ? THREE.MathUtils.degToRad(angleDeg) *
+              ((vrmRenderState.wander.vx || 1) >= 0 ? 1 : -1)
+            : 0;
 
     // Smoothly approach the target yaw.
     const k = 10; // larger = snappier
     const a = 1 - Math.exp(-k * Math.max(0, delta));
-    vrmRenderState.wander.faceYaw += (targetYaw - vrmRenderState.wander.faceYaw) * a;
+    vrmRenderState.wander.faceYaw +=
+        (targetYaw - vrmRenderState.wander.faceYaw) * a;
 }
 
 function updateDragLift(delta) {
@@ -1954,24 +2104,39 @@ function applyRelaxOrDragPose(delta) {
 
         // Map lift (0..?) to 0..1 strength.
         const sizeY = vrm.scene.userData.__vrmPetBBoxSizeY ?? 1.6;
-        const liftNorm = clamp((vrmRenderState.dragLift.lift || 0) / Math.max(0.25, sizeY * 0.12), 0, 1);
+        const liftNorm = clamp(
+            (vrmRenderState.dragLift.lift || 0) / Math.max(0.25, sizeY * 0.12),
+            0,
+            1,
+        );
 
         // A little sway while held.
         const t = vrmRenderState.dragLift.time || 0;
         const sway = Math.sin(t * 6.0) * 0.5 + Math.sin(t * 3.2) * 0.5;
 
-        const raise = THREE.MathUtils.degToRad(28) * intensity * (0.35 + 0.65 * liftNorm);
+        const raise =
+            THREE.MathUtils.degToRad(28) * intensity * (0.35 + 0.65 * liftNorm);
         const out = THREE.MathUtils.degToRad(10) * intensity;
         const roll = THREE.MathUtils.degToRad(14) * intensity;
         const bend = THREE.MathUtils.degToRad(22) * intensity;
 
         if (lUA) {
-            eTmp.set(-raise * 0.75, 0, +roll * 0.6 + out * 0.6 + roll * 0.25 * sway, "XYZ");
+            eTmp.set(
+                -raise * 0.75,
+                0,
+                +roll * 0.6 + out * 0.6 + roll * 0.25 * sway,
+                "XYZ",
+            );
             qTmp.setFromEuler(eTmp);
             lUA.quaternion.multiply(qTmp);
         }
         if (rUA) {
-            eTmp.set(-raise * 0.75, 0, -roll * 0.6 - out * 0.6 - roll * 0.25 * sway, "XYZ");
+            eTmp.set(
+                -raise * 0.75,
+                0,
+                -roll * 0.6 - out * 0.6 - roll * 0.25 * sway,
+                "XYZ",
+            );
             qTmp.setFromEuler(eTmp);
             rUA.quaternion.multiply(qTmp);
         }
@@ -1993,7 +2158,11 @@ function applyRelaxOrDragPose(delta) {
 
     const modeRaw = String(pluginConfig.relaxArmsMode || "auto");
     const mode =
-        modeRaw === "xpitch" ? "xpitch" : modeRaw === "zroll" ? "zroll" : "auto";
+        modeRaw === "xpitch"
+            ? "xpitch"
+            : modeRaw === "zroll"
+              ? "zroll"
+              : "auto";
 
     const downDegRaw = Number(pluginConfig.relaxArmsDownDeg);
     const downDeg = Number.isFinite(downDegRaw) ? clamp(downDegRaw, 0, 80) : 55;
@@ -2080,7 +2249,7 @@ function applyRootPose() {
 
     // Position: base + drag lift offset.
     const dragEnabled = !!pluginConfig.dragLiftEnabled;
-    const liftY = dragEnabled ? (vrmRenderState.dragLift.lift || 0) : 0;
+    const liftY = dragEnabled ? vrmRenderState.dragLift.lift || 0 : 0;
     vrm.scene.position.copy(rest.position);
     vrm.scene.position.y += liftY;
 
@@ -2092,9 +2261,9 @@ function applyRootPose() {
     );
     const qTilt = new THREE.Quaternion().setFromEuler(
         new THREE.Euler(
-            dragEnabled ? (vrmRenderState.dragLift.tiltX || 0) : 0,
+            dragEnabled ? vrmRenderState.dragLift.tiltX || 0 : 0,
             0,
-            dragEnabled ? (vrmRenderState.dragLift.tiltZ || 0) : 0,
+            dragEnabled ? vrmRenderState.dragLift.tiltZ || 0 : 0,
             "XYZ",
         ),
     );
@@ -2465,7 +2634,11 @@ function applyPetEmotion(emotion, opts = {}) {
     if (e === "happy") {
         const overlayEl = document.getElementById("vrm-pet-overlay");
         const r = overlayEl?.getBoundingClientRect?.();
-        if (r) spawnHeartsAtClientPoint(r.left + r.width * 0.55, r.top + r.height * 0.2);
+        if (r)
+            spawnHeartsAtClientPoint(
+                r.left + r.width * 0.55,
+                r.top + r.height * 0.2,
+            );
     } else if (e === "angry") {
         spawnPetEmojiFx("\uD83D\uDCA2"); // 💢
     } else if (e === "speechless") {
@@ -2483,7 +2656,8 @@ function updateExpressionFx(delta) {
     const now = performance.now();
     const fadeIn = Math.max(0, Number(fx.fadeInMs) || 0);
     const fadeOut = Math.max(0, Number(fx.fadeOutMs) || 0);
-    const tIn = fadeIn <= 0 ? 1 : clamp01((now - (fx.startedAt || now)) / fadeIn);
+    const tIn =
+        fadeIn <= 0 ? 1 : clamp01((now - (fx.startedAt || now)) / fadeIn);
     const tOut =
         fadeOut <= 0
             ? 0
@@ -2521,7 +2695,7 @@ function updateExpressionFx(delta) {
         // There is no guaranteed VRM preset for "speechless"; approximate gently.
         setExpressionValueSafe(vrm, "sad", s * 0.25);
         setExpressionValueSafe(vrm, "sorrow", s * 0.25);
-        setExpressionValueSafe(vrm, "angry", s * 0.10);
+        setExpressionValueSafe(vrm, "angry", s * 0.1);
     } else if (fx.active === "blackface") {
         // Some models have a "sad/angry" look that works for "blackface"; prefer overlay FX anyway.
         setExpressionValueSafe(vrm, "angry", s * 0.35);
@@ -2534,16 +2708,28 @@ function detectPetEmotionFromText(text) {
     if (!s.trim()) return null;
 
     // Blackface.
-    if (/[（(]?\s*黑脸\s*[)）]?/.test(s) || /(黑脸|黑著脸|黑着脸)/.test(s)) return "blackface";
+    if (/[（(]?\s*黑脸\s*[)）]?/.test(s) || /(黑脸|黑著脸|黑着脸)/.test(s))
+        return "blackface";
 
     // Speechless / annoyed / awkward silence.
-    if (/(无语|呵呵|呵呵哒|服了|沉默|尴尬|好吧|行吧|算了|……{2,}|(?:\.\.){3,})/.test(s)) return "speechless";
+    if (
+        /(无语|呵呵|呵呵哒|服了|沉默|尴尬|好吧|行吧|算了|……{2,}|(?:\.\.){3,})/.test(
+            s,
+        )
+    )
+        return "speechless";
 
     // Angry.
-    if (/(生气|气死|愤怒|怒|火大|别闹|讨厌|哼|气炸|爆炸|怒了|翻车)/.test(s)) return "angry";
+    if (/(生气|气死|愤怒|怒|火大|别闹|讨厌|哼|气炸|爆炸|怒了|翻车)/.test(s))
+        return "angry";
 
     // Happy.
-    if (/(开心|高兴|好耶|太好啦|喜欢|爱你|可爱|棒|耶|哈哈|笑死|嘻嘻|嘿嘿)/.test(s)) return "happy";
+    if (
+        /(开心|高兴|好耶|太好啦|喜欢|爱你|可爱|棒|耶|哈哈|笑死|嘻嘻|嘿嘿)/.test(
+            s,
+        )
+    )
+        return "happy";
 
     return null;
 }
@@ -2563,7 +2749,7 @@ async function buildAiReplyContextText({ ctx, maxMessages = 24 }) {
     const lines = [];
     for (const m of tail) {
         const isUser = !!m?.is_user;
-        const who = isUser ? nameUser : (m?.name || nameChar);
+        const who = isUser ? nameUser : m?.name || nameChar;
         const mes = stripThinkTags(String(m?.mes ?? ""));
         if (!mes) continue;
         // Keep whitespace readable but stable.
@@ -2613,7 +2799,10 @@ async function captureNativeGeneratePrompt({ ctx, quietPrompt }) {
                 clearTimeout(timer);
             } catch (_) {}
             try {
-                ctx.eventSource.removeListener(ctx.eventTypes.GENERATE_AFTER_DATA, handler);
+                ctx.eventSource.removeListener(
+                    ctx.eventTypes.GENERATE_AFTER_DATA,
+                    handler,
+                );
             } catch (_) {}
         };
 
@@ -2730,8 +2919,8 @@ function ensureRelaxAxisCache(vrm) {
         if (!ua || !hand) return { axis: "z", sign: side === "left" ? 1 : -1 };
 
         const baseQ =
-            rest[side === "left" ? "leftUpperArm" : "rightUpperArm"]?.quaternion ??
-            null;
+            rest[side === "left" ? "leftUpperArm" : "rightUpperArm"]
+                ?.quaternion ?? null;
         if (!baseQ) return { axis: "z", sign: side === "left" ? 1 : -1 };
 
         const basePos = new THREE.Vector3();
@@ -2841,7 +3030,7 @@ function playRandomPetAction(kind = "gen") {
             ? ["tap", "nod", "wave", "tilt", "cheer"]
             : kind === "idle"
               ? ["nod", "bounce", "tilt", "wave", "cheer"]
-            : ["nod", "bounce", "wave", "tilt"];
+              : ["nod", "bounce", "wave", "tilt"];
     const idx = Math.floor(Math.random() * pool.length);
     playPetAction(pool[idx]);
 }
@@ -2881,7 +3070,9 @@ function updatePetAction(delta) {
         // Tiny bounce + quick nod.
         if (hips && rest.hips) {
             const amp = 0.04;
-            hips.position.y = rest.hips.position.y + amp * Math.sin(Math.PI * p) * (1.0 - 0.2 * p);
+            hips.position.y =
+                rest.hips.position.y +
+                amp * Math.sin(Math.PI * p) * (1.0 - 0.2 * p);
         }
         if (head) {
             const amp = THREE.MathUtils.degToRad(10);
@@ -2908,7 +3099,9 @@ function updatePetAction(delta) {
     } else if (a === "bounce") {
         if (hips && rest.hips) {
             const amp = 0.07;
-            hips.position.y = rest.hips.position.y + amp * Math.sin(Math.PI * p) * (0.3 + 0.7 * (1 - p));
+            hips.position.y =
+                rest.hips.position.y +
+                amp * Math.sin(Math.PI * p) * (0.3 + 0.7 * (1 - p));
         }
         if (head) {
             const amp = THREE.MathUtils.degToRad(6);
@@ -2985,7 +3178,10 @@ function updatePetAction(delta) {
                 amp * Math.sin(Math.PI * p) * (0.35 + 0.65 * (1 - p));
         }
         const raise = THREE.MathUtils.degToRad(55) * e;
-        const out = THREE.MathUtils.degToRad(14) * Math.sin(p * Math.PI * 2 * 3) * (0.25 + 0.75 * (1 - p));
+        const out =
+            THREE.MathUtils.degToRad(14) *
+            Math.sin(p * Math.PI * 2 * 3) *
+            (0.25 + 0.75 * (1 - p));
         if (lUA) {
             eTmp.set(-raise, 0, -out, "XYZ");
             qTmp.setFromEuler(eTmp);
@@ -3020,7 +3216,12 @@ function updatePetAction(delta) {
             const yaw = THREE.MathUtils.degToRad(10);
             const roll = THREE.MathUtils.degToRad(10);
             const phase = Math.sin(p * Math.PI * 2 * 3);
-            eTmp.set(0, yaw * phase * (0.4 + 0.6 * (1 - p)), roll * Math.sin(p * Math.PI * 2) * 0.35, "XYZ");
+            eTmp.set(
+                0,
+                yaw * phase * (0.4 + 0.6 * (1 - p)),
+                roll * Math.sin(p * Math.PI * 2) * 0.35,
+                "XYZ",
+            );
             qTmp.setFromEuler(eTmp);
             neck.quaternion.multiply(qTmp);
         }
@@ -3029,7 +3230,12 @@ function updatePetAction(delta) {
             const pitch = THREE.MathUtils.degToRad(8);
             const roll = THREE.MathUtils.degToRad(14);
             const phase = Math.sin(p * Math.PI * 2 * 3);
-            eTmp.set(-pitch * Math.sin(Math.PI * p) * 0.7, yaw * phase, roll * Math.sin(p * Math.PI * 2) * 0.6, "XYZ");
+            eTmp.set(
+                -pitch * Math.sin(Math.PI * p) * 0.7,
+                yaw * phase,
+                roll * Math.sin(p * Math.PI * 2) * 0.6,
+                "XYZ",
+            );
             qTmp.setFromEuler(eTmp);
             head.quaternion.multiply(qTmp);
         }
@@ -3092,7 +3298,11 @@ function bindStageInteractions(overlayEl) {
         if (e.pointerType !== "touch") return;
         clearLongPress();
         vrmRenderState.ui.longPressTriggered = false;
-        vrmRenderState.ui.longPressStart = { x: e.clientX, y: e.clientY, id: e.pointerId };
+        vrmRenderState.ui.longPressStart = {
+            x: e.clientX,
+            y: e.clientY,
+            id: e.pointerId,
+        };
         vrmRenderState.ui.longPressTimer = setTimeout(() => {
             if (!vrmRenderState.ui) return;
             vrmRenderState.ui.longPressTriggered = true;
@@ -3131,7 +3341,12 @@ function bindStageInteractions(overlayEl) {
     canvas.addEventListener("pointerdown", (e) => {
         // Long-press radial menu (touch).
         armLongPress(e);
-        down = { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId };
+        down = {
+            x: e.clientX,
+            y: e.clientY,
+            t: performance.now(),
+            id: e.pointerId,
+        };
     });
 
     canvas.addEventListener("pointerup", (e) => {
@@ -3154,7 +3369,10 @@ function bindStageInteractions(overlayEl) {
         const y = (e.clientY - rect.top) / Math.max(1, rect.height);
         ndc.set(x * 2 - 1, -(y * 2 - 1));
         raycaster.setFromCamera(ndc, vrmRenderState.camera);
-        const hits = raycaster.intersectObject(vrmRenderState.currentVrm.scene, true);
+        const hits = raycaster.intersectObject(
+            vrmRenderState.currentVrm.scene,
+            true,
+        );
         if (!hits || hits.length === 0) return;
 
         // Head pat: if click is near head bone, play a special action + hearts.
@@ -3168,8 +3386,8 @@ function bindStageInteractions(overlayEl) {
                 headBone.getWorldPosition(headPos);
                 const hitPos = hits[0].point;
                 const sizeY =
-                    vrmRenderState.currentVrm?.scene?.userData?.__vrmPetBBoxSizeY ??
-                    1.6;
+                    vrmRenderState.currentVrm?.scene?.userData
+                        ?.__vrmPetBBoxSizeY ?? 1.6;
                 const fRaw = Number(pluginConfig.patHeadRadiusFactor);
                 const f = Number.isFinite(fRaw) ? clamp(fRaw, 0.08, 0.4) : 0.22;
                 const threshold = Math.max(0.05, Math.max(0.1, sizeY) * f);
@@ -3247,9 +3465,18 @@ function spawnPetEmojiFx(emojiText) {
         el.style.left = `${clamp(x0, 0, rect.width)}px`;
         el.style.top = `${clamp(y0, 0, rect.height)}px`;
 
-        el.style.setProperty("--vrmPetDx", `${randRange(-10, 10).toFixed(1)}px`);
-        el.style.setProperty("--vrmPetLift", `${randRange(18, 34).toFixed(1)}px`);
-        el.style.setProperty("--vrmPetDur", `${randRange(650, 950).toFixed(0)}ms`);
+        el.style.setProperty(
+            "--vrmPetDx",
+            `${randRange(-10, 10).toFixed(1)}px`,
+        );
+        el.style.setProperty(
+            "--vrmPetLift",
+            `${randRange(18, 34).toFixed(1)}px`,
+        );
+        el.style.setProperty(
+            "--vrmPetDur",
+            `${randRange(650, 950).toFixed(0)}ms`,
+        );
 
         fx.appendChild(el);
         el.addEventListener(
@@ -3298,7 +3525,11 @@ function spawnHeartsAtClientPoint(clientX, clientY) {
         const x0 = clientX - rect.left;
         const y0 = clientY - rect.top;
 
-        const count = clamp(parseInt(String(pluginConfig.patHeartCount ?? 7), 10) || 7, 1, 20);
+        const count = clamp(
+            parseInt(String(pluginConfig.patHeartCount ?? 7), 10) || 7,
+            1,
+            20,
+        );
         for (let i = 0; i < count; i++) {
             const el = document.createElement("div");
             el.className = "vrm-pet-heart";
@@ -3309,9 +3540,18 @@ function spawnHeartsAtClientPoint(clientX, clientY) {
             const y = clamp(y0 + dy, 0, rect.height);
             el.style.left = `${x}px`;
             el.style.top = `${y}px`;
-            el.style.setProperty("--vrmPetDx", `${randRange(-14, 14).toFixed(1)}px`);
-            el.style.setProperty("--vrmPetLift", `${randRange(28, 56).toFixed(1)}px`);
-            el.style.setProperty("--vrmPetDur", `${randRange(520, 900).toFixed(0)}ms`);
+            el.style.setProperty(
+                "--vrmPetDx",
+                `${randRange(-14, 14).toFixed(1)}px`,
+            );
+            el.style.setProperty(
+                "--vrmPetLift",
+                `${randRange(28, 56).toFixed(1)}px`,
+            );
+            el.style.setProperty(
+                "--vrmPetDur",
+                `${randRange(520, 900).toFixed(0)}ms`,
+            );
             fx.appendChild(el);
             el.addEventListener(
                 "animationend",
@@ -3792,9 +4032,9 @@ function createSettingsInterface() {
               <div class="settings-title-description">不同模型骨骼轴向不一样；推荐用“自动”</div>
               <div class="marginTop5">
                 <select id="${MODULE_NAME}_relax_arms_mode" class="text_pole">
-                  <option value="auto" ${String(pluginConfig.relaxArmsMode||"auto")==="auto" ? "selected" : ""}>自动（推荐）</option>
-                  <option value="zroll" ${String(pluginConfig.relaxArmsMode||"auto")==="zroll" ? "selected" : ""}>Z 轴滚转（手动）</option>
-                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode||"auto")==="xpitch" ? "selected" : ""}>X 轴下压（手动）</option>
+                  <option value="auto" ${String(pluginConfig.relaxArmsMode || "auto") === "auto" ? "selected" : ""}>自动（推荐）</option>
+                  <option value="zroll" ${String(pluginConfig.relaxArmsMode || "auto") === "zroll" ? "selected" : ""}>Z 轴滚转（手动）</option>
+                  <option value="xpitch" ${String(pluginConfig.relaxArmsMode || "auto") === "xpitch" ? "selected" : ""}>X 轴下压（手动）</option>
                 </select>
               </div>
             </div>
@@ -3954,49 +4194,65 @@ function bindSettingsEvents() {
             ensureOverlay();
         }
         if (t.id === `${MODULE_NAME}_wander_enabled`) {
-            pluginConfig.wanderEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.wanderEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             // Nudge it to start moving soon.
             vrmRenderState.wander.pausedUntil = performance.now() + 200;
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_wander_gait_enabled`) {
-            pluginConfig.wanderGaitEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.wanderGaitEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_wander_face_enabled`) {
-            pluginConfig.wanderFaceEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.wanderFaceEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             saveSettings();
 
             // If disabled, immediately restore to the baseline (front-facing) pose.
             if (!pluginConfig.wanderFaceEnabled && vrmRenderState.currentVrm) {
                 const rest =
-                    vrmRenderState.currentVrm.scene?.userData?.__vrmPetRootRest ??
-                    null;
+                    vrmRenderState.currentVrm.scene?.userData
+                        ?.__vrmPetRootRest ?? null;
                 vrmRenderState.wander.faceYaw = 0;
                 if (rest?.quaternion) {
                     // Ensure we snap back to front-facing immediately.
-                    vrmRenderState.currentVrm.scene.quaternion.copy(rest.quaternion);
+                    vrmRenderState.currentVrm.scene.quaternion.copy(
+                        rest.quaternion,
+                    );
                 }
                 applyRootPose();
             }
         }
 
         if (t.id === `${MODULE_NAME}_head_track`) {
-            pluginConfig.headTrackEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.headTrackEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_eye_track`) {
-            pluginConfig.eyeTrackEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.eyeTrackEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_idle_enabled`) {
-            pluginConfig.idleEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.idleEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             // Reset idle schedule immediately.
             markInteraction();
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_blink_enabled`) {
-            pluginConfig.blinkEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.blinkEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             // Restart schedule so it feels responsive.
             const now = performance.now();
             vrmRenderState.blink.active = false;
@@ -4006,17 +4262,20 @@ function bindSettingsEvents() {
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_pat_enabled`) {
-            pluginConfig.patEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.patEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_relax_arms`) {
-            pluginConfig.relaxArmsEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.relaxArmsEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_relax_arms_gait`) {
-            pluginConfig.relaxArmsDuringWanderGait = /** @type {HTMLInputElement} */ (
-                t
-            ).checked;
+            pluginConfig.relaxArmsDuringWanderGait =
+                /** @type {HTMLInputElement} */ (t).checked;
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_relax_arms_mode`) {
@@ -4026,7 +4285,9 @@ function bindSettingsEvents() {
             saveSettings();
         }
         if (t.id === `${MODULE_NAME}_drag_pose`) {
-            pluginConfig.dragHeldPoseEnabled = /** @type {HTMLInputElement} */ (t).checked;
+            pluginConfig.dragHeldPoseEnabled = /** @type {HTMLInputElement} */ (
+                t
+            ).checked;
             saveSettings();
         }
 
@@ -4091,9 +4352,13 @@ function bindSettingsEvents() {
             pluginConfig.overlayFrameOpacity = Number.isFinite(v)
                 ? clamp(v, 0, 0.9)
                 : DEFAULT_CONFIG.overlayFrameOpacity;
-            const out = document.getElementById(`${MODULE_NAME}_frame_opacity_val`);
+            const out = document.getElementById(
+                `${MODULE_NAME}_frame_opacity_val`,
+            );
             if (out)
-                out.textContent = Number(pluginConfig.overlayFrameOpacity ?? 0.35).toFixed(2);
+                out.textContent = Number(
+                    pluginConfig.overlayFrameOpacity ?? 0.35,
+                ).toFixed(2);
             saveSettings();
             ensureOverlay();
         }
@@ -4106,24 +4371,38 @@ function bindSettingsEvents() {
             const out = document.getElementById(
                 `${MODULE_NAME}_model_scale_val`,
             );
-            if (out) out.textContent = Number(pluginConfig.modelScale || 1).toFixed(2);
+            if (out)
+                out.textContent = Number(pluginConfig.modelScale || 1).toFixed(
+                    2,
+                );
             saveSettings();
             applyModelScaleAndRefit();
         }
 
         if (t.id === `${MODULE_NAME}_wander_speed`) {
             const v = parseInt(/** @type {HTMLInputElement} */ (t).value, 10);
-            pluginConfig.wanderSpeed = Number.isFinite(v) ? v : DEFAULT_CONFIG.wanderSpeed;
-            const out = document.getElementById(`${MODULE_NAME}_wander_speed_val`);
+            pluginConfig.wanderSpeed = Number.isFinite(v)
+                ? v
+                : DEFAULT_CONFIG.wanderSpeed;
+            const out = document.getElementById(
+                `${MODULE_NAME}_wander_speed_val`,
+            );
             if (out) out.textContent = String(pluginConfig.wanderSpeed);
             saveSettings();
         }
 
         if (t.id === `${MODULE_NAME}_wander_gait_intensity`) {
             const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
-            pluginConfig.wanderGaitIntensity = Number.isFinite(v) ? v : DEFAULT_CONFIG.wanderGaitIntensity;
-            const out = document.getElementById(`${MODULE_NAME}_wander_gait_intensity_val`);
-            if (out) out.textContent = Number(pluginConfig.wanderGaitIntensity ?? 1).toFixed(2);
+            pluginConfig.wanderGaitIntensity = Number.isFinite(v)
+                ? v
+                : DEFAULT_CONFIG.wanderGaitIntensity;
+            const out = document.getElementById(
+                `${MODULE_NAME}_wander_gait_intensity_val`,
+            );
+            if (out)
+                out.textContent = Number(
+                    pluginConfig.wanderGaitIntensity ?? 1,
+                ).toFixed(2);
             saveSettings();
         }
 
@@ -4131,7 +4410,9 @@ function bindSettingsEvents() {
             const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
             const deg = Number.isFinite(v) ? Math.max(0, Math.min(90, v)) : 45;
             pluginConfig.wanderFaceAngleDeg = deg;
-            const out = document.getElementById(`${MODULE_NAME}_wander_face_angle_val`);
+            const out = document.getElementById(
+                `${MODULE_NAME}_wander_face_angle_val`,
+            );
             if (out) out.textContent = String(Math.round(deg));
             saveSettings();
             // Camera fit uses diagonal XZ now; this is mostly optional, but refit helps immediately.
@@ -4142,7 +4423,9 @@ function bindSettingsEvents() {
             const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
             const deg = Number.isFinite(v) ? clamp(v, 0, 80) : 55;
             pluginConfig.relaxArmsDownDeg = deg;
-            const out = document.getElementById(`${MODULE_NAME}_relax_arms_down_val`);
+            const out = document.getElementById(
+                `${MODULE_NAME}_relax_arms_down_val`,
+            );
             if (out) out.textContent = String(Math.round(deg));
             saveSettings();
         }
@@ -4151,7 +4434,9 @@ function bindSettingsEvents() {
             const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
             const deg = Number.isFinite(v) ? clamp(v, 0, 35) : 16;
             pluginConfig.relaxArmsElbowBendDeg = deg;
-            const out = document.getElementById(`${MODULE_NAME}_relax_arms_bend_val`);
+            const out = document.getElementById(
+                `${MODULE_NAME}_relax_arms_bend_val`,
+            );
             if (out) out.textContent = String(Math.round(deg));
             saveSettings();
         }
@@ -4160,7 +4445,9 @@ function bindSettingsEvents() {
             const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
             const deg = Number.isFinite(v) ? clamp(v, -25, 35) : 10;
             pluginConfig.relaxArmsForwardDeg = deg;
-            const out = document.getElementById(`${MODULE_NAME}_relax_arms_fwd_val`);
+            const out = document.getElementById(
+                `${MODULE_NAME}_relax_arms_fwd_val`,
+            );
             if (out) out.textContent = String(Math.round(deg));
             saveSettings();
         }
@@ -4169,17 +4456,25 @@ function bindSettingsEvents() {
             const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
             const deg = Number.isFinite(v) ? clamp(v, -25, 25) : 8;
             pluginConfig.relaxArmsOutDeg = deg;
-            const out = document.getElementById(`${MODULE_NAME}_relax_arms_out_val`);
+            const out = document.getElementById(
+                `${MODULE_NAME}_relax_arms_out_val`,
+            );
             if (out) out.textContent = String(Math.round(deg));
             saveSettings();
         }
 
         if (t.id === `${MODULE_NAME}_drag_pose_intensity`) {
             const v = parseFloat(/** @type {HTMLInputElement} */ (t).value);
-            pluginConfig.dragHeldPoseIntensity = Number.isFinite(v) ? clamp(v, 0, 2) : 1.0;
-            const out = document.getElementById(`${MODULE_NAME}_drag_pose_intensity_val`);
+            pluginConfig.dragHeldPoseIntensity = Number.isFinite(v)
+                ? clamp(v, 0, 2)
+                : 1.0;
+            const out = document.getElementById(
+                `${MODULE_NAME}_drag_pose_intensity_val`,
+            );
             if (out)
-                out.textContent = Number(pluginConfig.dragHeldPoseIntensity ?? 1).toFixed(2);
+                out.textContent = Number(
+                    pluginConfig.dragHeldPoseIntensity ?? 1,
+                ).toFixed(2);
             saveSettings();
         }
     });
@@ -4255,6 +4550,7 @@ function bindCharacterChangeRefresh() {
             removePetChatModal();
             removePetEditorModal();
             removePetEmotePanel();
+            removePetSpeechBubble();
             refreshCurrentBindingText();
             loadVrmForCurrentCharacter().catch(() => {});
         });
@@ -4282,7 +4578,3 @@ function init() {
 }
 
 $(document).ready(() => init());
-
-
-
-
