@@ -2179,47 +2179,8 @@ function updateWanderGait(delta) {
         rLA.quaternion.multiply(qTmp);
     }
 
-    // Leg swing (simple walk cycle).
-    // Note: raw bone axes can vary by model, but this is usually "good enough" for a cute overlay gait.
-    const legSwing = THREE.MathUtils.degToRad(28) * intensity;
-    if (lUL) {
-        eTmp.set(-legSwing * s * 0.9, 0, 0, "XYZ");
-        qTmp.setFromEuler(eTmp);
-        lUL.quaternion.multiply(qTmp);
-    }
-    if (rUL) {
-        eTmp.set(legSwing * s * 0.9, 0, 0, "XYZ");
-        qTmp.setFromEuler(eTmp);
-        rUL.quaternion.multiply(qTmp);
-    }
-
-    // Knee bend: bend more when the leg is moving back (approx) + always a bit for "bounce".
-    const knee = THREE.MathUtils.degToRad(26) * intensity;
-    const kneeL = Math.max(0, -s); // left bends when left leg goes back
-    const kneeR = Math.max(0, s); // right bends when right leg goes back
-    if (lLL) {
-        eTmp.set(-knee * (0.15 + 0.85 * kneeL), 0, 0, "XYZ");
-        qTmp.setFromEuler(eTmp);
-        lLL.quaternion.multiply(qTmp);
-    }
-    if (rLL) {
-        eTmp.set(-knee * (0.15 + 0.85 * kneeR), 0, 0, "XYZ");
-        qTmp.setFromEuler(eTmp);
-        rLL.quaternion.multiply(qTmp);
-    }
-
-    // Foot compensation so it doesn't look like toes are always pointing down.
-    const foot = THREE.MathUtils.degToRad(10) * intensity;
-    if (lF) {
-        eTmp.set(foot * kneeL, 0, 0, "XYZ");
-        qTmp.setFromEuler(eTmp);
-        lF.quaternion.multiply(qTmp);
-    }
-    if (rF) {
-        eTmp.set(foot * kneeR, 0, 0, "XYZ");
-        qTmp.setFromEuler(eTmp);
-        rF.quaternion.multiply(qTmp);
-    }
+    // Legs: use axis-auto gait so knees bend correctly across different VRM bone local axes.
+    applyProceduralLegGait(vrm, vrmRenderState.wander.gaitTime || 0, intensity);
 }
 
 function updateWanderFacing(delta) {
@@ -3080,14 +3041,7 @@ async function captureNativeGeneratePrompt({ ctx, quietPrompt }) {
 
 function initPetActionRig(vrm) {
     // Cache bone nodes + their "rest" transforms so actions don't accumulate drift.
-    const humanoid = vrm?.humanoid;
-    const getBone = (name) => {
-        try {
-            return humanoid?.getRawBoneNode?.(name) ?? null;
-        } catch (_) {
-            return null;
-        }
-    };
+    const getBone = (name) => getHumanoidBoneNode(vrm, name);
 
     const boneNames = [
         "hips",
@@ -4795,7 +4749,6 @@ function init() {
     createSettingsInterface();
     refreshSelectedFileText();
     ensureOverlay();
-    ensureLegGaitLoop();
     bindGlobalPointerTracking();
     markInteraction();
     bindCharacterChangeRefresh();
