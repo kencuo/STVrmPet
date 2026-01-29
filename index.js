@@ -529,7 +529,7 @@ function getSendTextarea() {
 function insertTextIntoSendTextarea(text) {
     const el = getSendTextarea();
     if (!el) return false;
-    const t = String(text ?? "");
+    const t = stripThinkTags(String(text ?? ""));
     if (!t) return false;
 
     // Insert at cursor if possible, else append.
@@ -552,6 +552,15 @@ function insertTextIntoSendTextarea(text) {
         el.focus();
         return true;
     }
+}
+
+function stripThinkTags(text) {
+    // Remove common chain-of-thought wrappers so we don't show them in UI.
+    // Drops the entire tagged content.
+    let s = String(text ?? "");
+    s = s.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "");
+    s = s.replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "");
+    return s.trim();
 }
 
 function getPetPersonaForCurrentCharacter() {
@@ -953,7 +962,7 @@ function renderPetChatMessages(container, messages, nameUser, namePet) {
 
         const bubble = document.createElement("div");
         bubble.className = "vrm-pet-chat-bubble";
-        bubble.textContent = String(m.text ?? "");
+        bubble.textContent = stripThinkTags(String(m.text ?? ""));
 
         row.appendChild(who);
         wrap.appendChild(bubble);
@@ -1168,7 +1177,7 @@ function showPetChatModal() {
                 systemPrompt,
             });
 
-            const out = String(reply ?? "").trim();
+            const out = stripThinkTags(String(reply ?? ""));
             if (!out) throw new Error("Empty reply");
             msgs.push({ role: "assistant", text: out, at: Date.now() });
             await savePetChatMessagesForCurrentCharacter(msgs);
@@ -1338,19 +1347,59 @@ function showPetRadialMenu(clientX, clientY) {
                 const ctx = getContext();
                 if (!ctx?.generateRaw) throw new Error("generateRaw unavailable");
                 const persona = getPetPersonaForCurrentCharacter();
-                const systemPrompt = buildPetSystemPrompt(persona);
-                const promptText = await buildAiReplyContextText({
-                    ctx,
-                    maxMessages: 24,
-                });
+                const extra = getPetSystemPromptExtraForCurrentCharacter();
 
+                // Prefer SillyTavern's native prompt assembly (Generate dry-run) so character card, WI/AN, etc match.
+                // Still use generateRaw() to actually query the model (so you can bypass the main "send" workflow).
+                let promptForModel = null;
+                try {
+                    const nameChar = String(ctx?.name2 || "Assistant");
+                    const quietPrompt = [
+                        PET_AI_SYSTEM_PROMPT_BASE,
+                        persona ? `Character persona:\n${persona}` : "",
+                        extra ? `Extra instructions:\n${extra}` : "",
+                        `Now write ${nameChar}'s next reply. Output only the reply text (no name prefix).`,
+                    ]
+                        .filter(Boolean)
+                        .join("\n\n");
+                    promptForModel = await captureNativeGeneratePrompt({
+                        ctx,
+                        quietPrompt,
+                    });
+                } catch (_) {
+                    promptForModel = null;
+                }
+
+                // Fallback: local minimal prompt with WI scan (best-effort).
+                if (!promptForModel) {
+                    const systemPrompt = buildPetSystemPrompt(persona);
+                    promptForModel = await buildAiReplyContextText({
+                        ctx,
+                        maxMessages: 24,
+                    });
+
+                    const reply = await ctx.generateRaw({
+                        prompt: promptForModel,
+                        systemPrompt,
+                        trimNames: true,
+                    });
+
+                    const text = stripThinkTags(String(reply ?? ""));
+                    if (!text) throw new Error("Empty reply");
+                    insertTextIntoSendTextarea(text);
+                    toastr?.success?.("已生成回复并填入输入框", "VRM Pet");
+                    triggerPetEmotionFromText(text);
+                    return;
+                }
+
+                // When using native prompt capture, the prompt already includes system/story/WI etc.
                 const reply = await ctx.generateRaw({
-                    prompt: promptText,
-                    systemPrompt,
+                    prompt: promptForModel,
+                    systemPrompt: "",
                     trimNames: true,
                 });
 
-                const text = String(reply ?? "").trim();
+                const text = stripThinkTags(String(reply ?? ""));
                 if (!text) throw new Error("Empty reply");
                 insertTextIntoSendTextarea(text);
                 toastr?.success?.("已生成回复并填入输入框", "VRM Pet");
@@ -2500,7 +2549,7 @@ function detectPetEmotionFromText(text) {
 }
 
 function triggerPetEmotionFromText(text) {
-    const emo = detectPetEmotionFromText(text);
+    const emo = detectPetEmotionFromText(stripThinkTags(text));
     if (!emo) return;
     applyPetEmotion(emo, { durationMs: 1600 });
 }
@@ -2515,7 +2564,7 @@ async function buildAiReplyContextText({ ctx, maxMessages = 24 }) {
     for (const m of tail) {
         const isUser = !!m?.is_user;
         const who = isUser ? nameUser : (m?.name || nameChar);
-        const mes = String(m?.mes ?? "").trim();
+        const mes = stripThinkTags(String(m?.mes ?? ""));
         if (!mes) continue;
         // Keep whitespace readable but stable.
         lines.push(`${who}: ${mes.replace(/\s+/g, " ")}`);
@@ -2541,6 +2590,77 @@ async function buildAiReplyContextText({ ctx, maxMessages = 24 }) {
     );
     parts.push(`Now write ${nameChar}'s next reply.`);
     return parts.join("\n\n");
+}
+
+async function captureNativeGeneratePrompt({ ctx, quietPrompt }) {
+    // Build the same prompt that SillyTavern's Generate() would send (chat history + WI/AN + story string etc),
+    // but capture it via dry-run and then use generateRaw() to actually query the model.
+    if (!ctx?.generate || !ctx?.eventSource || !ctx?.eventTypes)
+        throw new Error("Context missing generate/eventSource");
+
+    return new Promise((resolve, reject) => {
+        let done = false;
+        const timeoutMs = 12_000;
+        const timer = setTimeout(() => {
+            if (done) return;
+            done = true;
+            cleanup();
+            reject(new Error("Prompt capture timed out"));
+        }, timeoutMs);
+
+        const cleanup = () => {
+            try {
+                clearTimeout(timer);
+            } catch (_) {}
+            try {
+                ctx.eventSource.removeListener(ctx.eventTypes.GENERATE_AFTER_DATA, handler);
+            } catch (_) {}
+        };
+
+        const handler = (generateData, dryRun) => {
+            // Only capture dry-run prompts.
+            if (!dryRun) return;
+            const p = generateData?.prompt ?? generateData?.input ?? null;
+            if (!p) return;
+            if (done) return;
+            done = true;
+            cleanup();
+            resolve(p);
+        };
+
+        try {
+            ctx.eventSource.on(ctx.eventTypes.GENERATE_AFTER_DATA, handler);
+        } catch (err) {
+            done = true;
+            cleanup();
+            reject(err);
+            return;
+        }
+
+        // Dry-run: Generate() will emit GENERATE_AFTER_DATA with the prompt, then resolve without generating.
+        Promise.resolve()
+            .then(() =>
+                ctx.generate(
+                    "quiet",
+                    {
+                        quiet_prompt: String(quietPrompt ?? ""),
+                        quietToLoud: true, // produce a character reply
+                        skipWIAN: false, // include WI/AN injections in the prompt
+                        force_name2: true,
+                    },
+                    true, // dryRun
+                ),
+            )
+            .then(() => {
+                // In case Generate() returns without emitting (shouldn't happen), rely on timeout.
+            })
+            .catch((err) => {
+                if (done) return;
+                done = true;
+                cleanup();
+                reject(err);
+            });
+    });
 }
 
 function initPetActionRig(vrm) {
