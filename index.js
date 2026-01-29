@@ -180,7 +180,7 @@ const vrmRenderState = {
 
     // Facial expression + simple overlay effects.
     expressionFx: {
-        // 'happy' | 'angry' | 'sad' | 'blackface' | 'neutral' | null
+        // 'happy' | 'angry' | 'speechless' | 'blackface' | 'neutral' | null
         active: null,
         // ms timestamps (performance.now)
         startedAt: 0,
@@ -721,7 +721,7 @@ function showPetEmotePanel() {
     const presets = [
         { id: "happy", label: "开心", icon: "\u263A" }, // ☺
         { id: "angry", label: "愤怒", icon: "\uD83D\uDCA2" }, // 💢
-        { id: "sad", label: "难过", icon: "\uD83D\uDCA7" }, // 💧
+        { id: "speechless", label: "无语", icon: "\uD83D\uDE11" }, // 😑
         { id: "blackface", label: "黑脸", icon: "\u2026" }, // …
         { id: "neutral", label: "恢复", icon: "\u21BA" }, // ↺
     ];
@@ -1338,36 +1338,16 @@ function showPetRadialMenu(clientX, clientY) {
                 const ctx = getContext();
                 if (!ctx?.generateRaw) throw new Error("generateRaw unavailable");
                 const persona = getPetPersonaForCurrentCharacter();
-
-                const chat = Array.isArray(ctx.chat) ? ctx.chat : [];
-                const max = 16;
-                const tail = chat.slice(-max);
-                const nameUser = String(ctx.name1 || "User");
-                const nameChar = String(ctx.name2 || "Assistant");
-
-                const lines = [];
-                for (const m of tail) {
-                    const isUser = !!m?.is_user;
-                    const who = isUser ? nameUser : (m?.name || nameChar);
-                    const mes = String(m?.mes ?? "")
-                        .replace(/\s+/g, " ")
-                        .trim();
-                    if (!mes) continue;
-                    lines.push(`${who}: ${mes}`);
-                }
-
                 const systemPrompt = buildPetSystemPrompt(persona);
-
-                const promptText = [
-                    `Conversation (most recent last):`,
-                    lines.length ? lines.join("\n") : "(no chat context available)",
-                    ``,
-                    `Now write ${nameChar}'s next reply.`,
-                ].join("\n");
+                const promptText = await buildAiReplyContextText({
+                    ctx,
+                    maxMessages: 24,
+                });
 
                 const reply = await ctx.generateRaw({
                     prompt: promptText,
                     systemPrompt,
+                    trimNames: true,
                 });
 
                 const text = String(reply ?? "").trim();
@@ -2439,8 +2419,8 @@ function applyPetEmotion(emotion, opts = {}) {
         if (r) spawnHeartsAtClientPoint(r.left + r.width * 0.55, r.top + r.height * 0.2);
     } else if (e === "angry") {
         spawnPetEmojiFx("\uD83D\uDCA2"); // 💢
-    } else if (e === "sad") {
-        spawnPetEmojiFx("\uD83D\uDCA7"); // 💧
+    } else if (e === "speechless") {
+        spawnPetEmojiFx("\uD83D\uDE11"); // 😑
     } else if (e === "blackface") {
         spawnPetBlackFaceFx();
     }
@@ -2488,9 +2468,11 @@ function updateExpressionFx(delta) {
         setExpressionValueSafe(vrm, "relaxed", s * 0.35);
     } else if (fx.active === "angry") {
         setExpressionValueSafe(vrm, "angry", s);
-    } else if (fx.active === "sad") {
-        setExpressionValueSafe(vrm, "sad", s);
-        setExpressionValueSafe(vrm, "sorrow", s);
+    } else if (fx.active === "speechless") {
+        // There is no guaranteed VRM preset for "speechless"; approximate gently.
+        setExpressionValueSafe(vrm, "sad", s * 0.25);
+        setExpressionValueSafe(vrm, "sorrow", s * 0.25);
+        setExpressionValueSafe(vrm, "angry", s * 0.10);
     } else if (fx.active === "blackface") {
         // Some models have a "sad/angry" look that works for "blackface"; prefer overlay FX anyway.
         setExpressionValueSafe(vrm, "angry", s * 0.35);
@@ -2502,19 +2484,17 @@ function detectPetEmotionFromText(text) {
     const s = String(text ?? "");
     if (!s.trim()) return null;
 
-    // Blackface / speechless / annoyed.
-    if (/[（(]?\s*黑脸\s*[)）]?/.test(s) || /(无语|呵呵|呵呵哒|服了|沉默|……{2,}|(?:\.\.){3,})/.test(s)) {
-        return "blackface";
-    }
+    // Blackface.
+    if (/[（(]?\s*黑脸\s*[)）]?/.test(s) || /(黑脸|黑著脸|黑着脸)/.test(s)) return "blackface";
+
+    // Speechless / annoyed / awkward silence.
+    if (/(无语|呵呵|呵呵哒|服了|沉默|尴尬|好吧|行吧|算了|……{2,}|(?:\.\.){3,})/.test(s)) return "speechless";
 
     // Angry.
     if (/(生气|气死|愤怒|怒|火大|别闹|讨厌|哼|气炸|爆炸|怒了|翻车)/.test(s)) return "angry";
 
     // Happy.
     if (/(开心|高兴|好耶|太好啦|喜欢|爱你|可爱|棒|耶|哈哈|笑死|嘻嘻|嘿嘿)/.test(s)) return "happy";
-
-    // Sad.
-    if (/(难过|伤心|呜呜|哭|委屈|QAQ|T_T)/.test(s)) return "sad";
 
     return null;
 }
@@ -2523,6 +2503,44 @@ function triggerPetEmotionFromText(text) {
     const emo = detectPetEmotionFromText(text);
     if (!emo) return;
     applyPetEmotion(emo, { durationMs: 1600 });
+}
+
+async function buildAiReplyContextText({ ctx, maxMessages = 24 }) {
+    const nameUser = String(ctx?.name1 || "User");
+    const nameChar = String(ctx?.name2 || "Assistant");
+    const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+    const tail = chat.slice(-Math.max(4, Number(maxMessages) || 24));
+
+    const lines = [];
+    for (const m of tail) {
+        const isUser = !!m?.is_user;
+        const who = isUser ? nameUser : (m?.name || nameChar);
+        const mes = String(m?.mes ?? "").trim();
+        if (!mes) continue;
+        // Keep whitespace readable but stable.
+        lines.push(`${who}: ${mes.replace(/\s+/g, " ")}`);
+    }
+
+    // Best-effort world info scan. ST expects reverse-order strings for scanning.
+    let wi = "";
+    try {
+        if (typeof ctx?.getWorldInfoPrompt === "function") {
+            const scan = [...lines].reverse();
+            const maxContext = Number(ctx?.maxContext) || 0;
+            const res = await ctx.getWorldInfoPrompt(scan, maxContext, true);
+            wi = String(res?.worldInfoString ?? "").trim();
+        }
+    } catch (_) {}
+
+    const parts = [];
+    if (wi) {
+        parts.push(`World Info / Author's Note:\n${wi}`);
+    }
+    parts.push(
+        `Chat history (most recent last):\n${lines.length ? lines.join("\n") : "(no chat context available)"}`,
+    );
+    parts.push(`Now write ${nameChar}'s next reply.`);
+    return parts.join("\n\n");
 }
 
 function initPetActionRig(vrm) {
