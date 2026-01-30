@@ -2260,7 +2260,6 @@ function applyRelaxOrDragPose(delta) {
     const vrm = vrmRenderState.currentVrm;
     if (!vrm) return;
     if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
-    if (vrmRenderState.petAction.active) return; // don't fight actions
 
     if (!vrm.scene.userData.__vrmPetBones) initPetActionRig(vrm);
     const bones = vrm.scene.userData.__vrmPetBones ?? null;
@@ -2272,7 +2271,7 @@ function applyRelaxOrDragPose(delta) {
         !!pluginConfig.wanderEnabled &&
         !!pluginConfig.wanderGaitEnabled &&
         now >= (vrmRenderState.wander.pausedUntil || 0);
-    if (gaitActive && !pluginConfig.relaxArmsDuringWanderGait) return;
+    const skipRelaxForGait = gaitActive && !pluginConfig.relaxArmsDuringWanderGait;
 
     const lUA = bones.leftUpperArm;
     const rUA = bones.rightUpperArm;
@@ -2341,7 +2340,12 @@ function applyRelaxOrDragPose(delta) {
         return;
     }
 
+    // During explicit actions, we bake "relax arms" into the action base pose (see updatePetAction),
+    // so don't apply it again here (but keep drag pose working).
+    if (vrmRenderState.petAction.active) return;
+
     if (!pluginConfig.relaxArmsEnabled) return;
+    if (skipRelaxForGait) return;
 
     const modeRaw = String(pluginConfig.relaxArmsMode || "auto");
     const mode =
@@ -2415,6 +2419,107 @@ function applyRelaxOrDragPose(delta) {
             rUA.quaternion.multiply(qTmp);
         }
     }
+    if (lLA) {
+        eTmp.set(-bend, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        lLA.quaternion.multiply(qTmp);
+    }
+    if (rLA) {
+        eTmp.set(-bend, 0, 0, "XYZ");
+        qTmp.setFromEuler(eTmp);
+        rLA.quaternion.multiply(qTmp);
+    }
+}
+
+function applyRelaxArmsBasePoseForAction(vrm) {
+    // Ensure actions never "pop" back to T-pose: keep the same relax-arms mode/amount during actions too.
+    if (!vrm) return;
+    if (!pluginConfig.enabled || !pluginConfig.showOverlay) return;
+    if (!pluginConfig.relaxArmsEnabled) return;
+
+    if (!vrm.scene.userData.__vrmPetBones) initPetActionRig(vrm);
+    const bones = vrm.scene.userData.__vrmPetBones ?? null;
+    if (!bones) return;
+
+    const lUA = bones.leftUpperArm;
+    const rUA = bones.rightUpperArm;
+    const lLA = bones.leftLowerArm;
+    const rLA = bones.rightLowerArm;
+    if (!lUA && !rUA) return;
+
+    const qTmp = new THREE.Quaternion();
+    const eTmp = new THREE.Euler();
+
+    const modeRaw = String(pluginConfig.relaxArmsMode || "auto");
+    const mode =
+        modeRaw === "xpitch"
+            ? "xpitch"
+            : modeRaw === "zroll"
+              ? "zroll"
+              : "auto";
+
+    const downDegRaw = Number(pluginConfig.relaxArmsDownDeg);
+    const downDeg = Number.isFinite(downDegRaw) ? clamp(downDegRaw, 0, 80) : 55;
+    const fwdDegRaw = Number(pluginConfig.relaxArmsForwardDeg);
+    const fwdDeg = Number.isFinite(fwdDegRaw) ? clamp(fwdDegRaw, -25, 35) : 10;
+    const outDegRaw = Number(pluginConfig.relaxArmsOutDeg);
+    const outDeg = Number.isFinite(outDegRaw) ? clamp(outDegRaw, -25, 25) : 8;
+    const bendDegRaw = Number(pluginConfig.relaxArmsElbowBendDeg);
+    const bendDeg = Number.isFinite(bendDegRaw) ? clamp(bendDegRaw, 0, 35) : 16;
+
+    const down = THREE.MathUtils.degToRad(downDeg);
+    const fwd = THREE.MathUtils.degToRad(fwdDeg);
+    const out = THREE.MathUtils.degToRad(outDeg);
+    const bend = THREE.MathUtils.degToRad(bendDeg);
+
+    if (mode === "auto") {
+        const picked = ensureRelaxAxisCache(vrm);
+
+        const applyPicked = (ua, pickedSide, sideZSign) => {
+            if (!ua) return;
+            const p = pickedSide ?? { axis: "z", sign: sideZSign };
+
+            // Base offsets to keep hands visible.
+            let rx = -fwd;
+            let ry = sideZSign > 0 ? +out : -out;
+            let rz = 0;
+
+            const radDown = down * (p.sign || 1);
+            if (p.axis === "x") rx += radDown;
+            else if (p.axis === "y") ry += radDown;
+            else rz += radDown;
+
+            eTmp.set(rx, ry, rz, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            ua.quaternion.multiply(qTmp);
+        };
+
+        applyPicked(lUA, picked?.left, 1);
+        applyPicked(rUA, picked?.right, -1);
+    } else if (mode === "zroll") {
+        if (lUA) {
+            eTmp.set(-fwd, +out, +down, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lUA.quaternion.multiply(qTmp);
+        }
+        if (rUA) {
+            eTmp.set(-fwd, -out, -down, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rUA.quaternion.multiply(qTmp);
+        }
+    } else {
+        if (lUA) {
+            eTmp.set(+down, +fwd * 0.35, +out * 0.85, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            lUA.quaternion.multiply(qTmp);
+        }
+        if (rUA) {
+            eTmp.set(+down, -fwd * 0.35, -out * 0.85, "XYZ");
+            qTmp.setFromEuler(eTmp);
+            rUA.quaternion.multiply(qTmp);
+        }
+    }
+
     if (lLA) {
         eTmp.set(-bend, 0, 0, "XYZ");
         qTmp.setFromEuler(eTmp);
@@ -3234,6 +3339,8 @@ function updatePetAction(delta) {
 
     // Re-apply rest every frame, then layer our small offsets (so VRM updates don't drift us).
     resetPetRigToRest(vrm);
+    // Keep arms in the relaxed-down pose even while an explicit action plays (prevents T-pose popping).
+    applyRelaxArmsBasePoseForAction(vrm);
 
     const qTmp = new THREE.Quaternion();
     const eTmp = new THREE.Euler();
